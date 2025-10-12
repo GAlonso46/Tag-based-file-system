@@ -1,6 +1,6 @@
 import tempfile
 import os
-from db import FileStore
+from data.file_store import FileStore
 
 # Tests unitarios para el sistema de archivos basado en tags
 
