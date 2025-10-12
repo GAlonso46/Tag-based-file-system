@@ -1,3 +1,8 @@
+
+# cli.py - Interfaz de línea de comandos para el sistema de archivos basado en tags
+# Ejemplo de uso:
+#   python -m cli add "C:\ruta\archivo.txt" "tag1,tag2"
+
 import argparse
 import sys
 import shlex
