@@ -1,0 +1,78 @@
+.file-card {
+    background: var(--card-bg);
+    padding: 25px;
+    border-radius: 15px;
+    box-shadow: 0 5px 20px var(--shadow-light);
+    transition: all 0.3s;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.file-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 10px 30px var(--shadow-medium);
+}
+
+.file-icon {
+    font-size: 3em;
+    text-align: center;
+}
+
+.file-name {
+    font-weight: 600;
+    font-size: 1.1em;
+    color: var(--text-primary);
+    word-break: break-word;
+    min-height: 2.5em;
+}
+
+.file-size {
+    color: var(--text-secondary);
+    font-size: 0.9em;
+}
+
+.file-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-height: 30px;
+}
+
+.file-tag {
+    padding: 5px 12px;
+    background: var(--tag-bg);
+    color: var(--tag-color);
+    border-radius: 15px;
+    font-size: 0.85em;
+    font-weight: 600;
+}
+
+.file-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: auto;
+    padding-top: 12px;
+    border-top: 2px solid var(--border-color);
+}
+
+.btn-icon {
+    flex: 1;
+    padding: 10px;
+    border: 2px solid var(--border-color);
+    background: var(--input-bg);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1.2em;
+    transition: all 0.3s;
+}
+
+.btn-icon:hover {
+    transform: scale(1.1);
+    background: var(--tag-bg);
+}
+
+.btn-danger:hover {
+    background: #fee;
+    border-color: #f88;
+}
