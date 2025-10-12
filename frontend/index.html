@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tag-Based File System</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            /* Light Mode Colors */
+            --bg-gradient-1: #667eea;
+            --bg-gradient-2: #764ba2;
+            --card-bg: #ffffff;
+            --text-primary: #333333;
+            --text-secondary: #666666;
+            --text-muted: #999999;
+            --border-color: #e0e0e0;
+            --shadow-light: rgba(0,0,0,0.1);
+            --shadow-medium: rgba(0,0,0,0.15);
+            --input-bg: #ffffff;
+            --tag-bg: #f0f2ff;
+            --tag-color: #667eea;
+        }
+
+        body.dark-mode {
+            /* Dark Mode Colors */
+            --bg-gradient-1: #1a1a2e;
+            --bg-gradient-2: #16213e;
+            --card-bg: #0f3460;
+            --text-primary: #e0e0e0;
+            --text-secondary: #b0b0b0;
+            --text-muted: #808080;
+            --border-color: #2a2a3e;
+            --shadow-light: rgba(0,0,0,0.3);
+            --shadow-medium: rgba(0,0,0,0.4);
+            --input-bg: #1a2332;
+            --tag-bg: #1e3a5f;
+            --tag-color: #8a9cff;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, var(--bg-gradient-1) 0%, var(--bg-gradient-2) 100%);
+            min-height: 100vh;
+            padding: 20px;
+            transition: background 0.3s ease;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: var(--card-bg);
+            padding: 30px;
+            border-radius: 20px;
+            box-shadow: 0 10px 40px var(--shadow-light);
+            margin-bottom: 30px;
+            transition: all 0.3s ease;
+        }
+
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+
+        .header h1 {
+            color: var(--text-primary);
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            transition: color 0.3s ease;
+        }
+
+        .header p {
+            color: var(--text-secondary);
+            font-size: 1.1em;
+            transition: color 0.3s ease;
+        }
+
+        .theme-toggle {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 20px;
+            background: var(--input-bg);
+            border: 2px solid var(--border-color);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 1em;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .theme-toggle:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px var(--shadow-light);
+        }
+
+        .toolbar {
+            background: var(--card-bg);
+            padding: 25px;
+            border-radius: 20px;
+            box-shadow: 0 10px 40px var(--shadow-light);
+            margin-bottom: 30px;
+            transition: all 0.3s ease;
+        }
+
+        .search-bar {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .search-input {
+            flex: 1;
+            padding: 15px 20px;
+            border: 2px solid var(--border-color);
+            border-radius: 12px;
+            font-size: 1em;
+            transition: all 0.3s;
+            min-width: 250px;
+            background: var(--input-bg);
+            color: var(--text-primary);
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .search-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .btn {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 12px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #f5f5f5;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .upload-zone {
+            border: 3px dashed #667eea;
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: #f8f9ff;
+            margin-bottom: 20px;
+        }
+
+        .upload-zone:hover {
+            background: #f0f2ff;
+            border-color: #764ba2;
+        }
+
+        .upload-zone.dragging {
+            background: #e8ebff;
+            transform: scale(1.02);
+        }
+
+        .upload-icon {
+            font-size: 3em;
+            margin-bottom: 15px;
+        }
+
+        .tag-input-container {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .tags-display {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .tag-chip {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .tag-chip:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+        }
+
+        .tag-chip.selected {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        }
+
+        .tag-chip .remove {
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        .files-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 25px;
+        }
+
+        .file-card {
+            background: var(--card-bg);
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 5px 20px var(--shadow-light);
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+
+        .file-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px var(--shadow-medium);
+        }
+
+        .file-icon {
+            font-size: 3em;
+            margin-bottom: 15px;
+            text-align: center;
+        }
+
+        .file-name {
+            font-weight: 600;
+            font-size: 1.1em;
+            margin-bottom: 10px;
+            color: var(--text-primary);
+            word-break: break-word;
+            transition: color 0.3s ease;
+        }
+
+        .file-size {
+            color: var(--text-muted);
+            font-size: 0.9em;
+            margin-bottom: 15px;
+            transition: color 0.3s ease;
+        }
+
+        .file-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 15px;
+        }
+
+        .file-tag {
+            background: var(--tag-bg);
+            color: var(--tag-color);
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 0.85em;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .file-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .btn-small {
+            padding: 8px 15px;
+            font-size: 0.85em;
+            flex: 1;
+        }
+
+        .btn-danger {
+            background: #ff4757;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #ff3838;
+        }
+
+        .btn-info {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-info:hover {
+            background: #5568d3;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: var(--card-bg);
+            padding: 40px;
+            border-radius: 20px;
+            max-width: 500px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+            transition: background 0.3s ease;
+        }
+
+        .modal-header {
+            font-size: 1.5em;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: var(--text-primary);
+            transition: color 0.3s ease;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-muted);
+            transition: color 0.3s ease;
+        }
+
+        .empty-state-icon {
+            font-size: 4em;
+            margin-bottom: 20px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #667eea;
+            font-size: 1.2em;
+        }
+
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: white;
+            padding: 20px 30px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            z-index: 2000;
+            display: none;
+            align-items: center;
+            gap: 15px;
+            min-width: 300px;
+        }
+
+        .notification.active {
+            display: flex;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        .notification.success {
+            border-left: 4px solid #2ecc71;
+        }
+
+        .notification.error {
+            border-left: 4px solid #ff4757;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <div class="header-content">
+                <div>
+                    <h1>
+                        <span>🏷️</span>
+                        Tag-Based File System
+                    </h1>
+                    <p>Organiza tus archivos con etiquetas inteligentes</p>
+                </div>
+                <button class="theme-toggle" onclick="toggleDarkMode()">
+                    <span id="themeIcon">🌙</span>
+                    <span id="themeText">Dark Mode</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Estadísticas -->
+        <div class="toolbar">
+            <div class="stats" id="stats">
+                <div class="stat-card">
+                    <div class="stat-value" id="totalFiles">0</div>
+                    <div class="stat-label">Archivos</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="totalTags">0</div>
+                    <div class="stat-label">Tags únicos</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="totalSize">0 MB</div>
+                    <div class="stat-label">Espacio usado</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toolbar de búsqueda y subida -->
+        <div class="toolbar">
+            <div class="search-bar">
+                <input 
+                    type="text" 
+                    class="search-input" 
+                    id="searchInput" 
+                    placeholder="🔍 Buscar por tags (ej: trabajo,importante)..."
+                >
+                <button class="btn btn-secondary" onclick="clearSearch()">
+                    ❌ Limpiar
+                </button>
+                <button class="btn btn-primary" onclick="openUploadModal()">
+                    📤 Subir archivo
+                </button>
+            </div>
+
+            <!-- Tags populares -->
+            <div>
+                <strong style="color: #666; margin-bottom: 10px; display: block;">Tags populares:</strong>
+                <div class="tags-display" id="popularTags"></div>
+            </div>
+        </div>
+
+        <!-- Grid de archivos -->
+        <div id="filesContainer">
+            <div class="loading">Cargando archivos...</div>
+        </div>
+    </div>
+
+    <!-- Modal de subida -->
+    <div class="modal" id="uploadModal">
+        <div class="modal-content">
+            <div class="modal-header">📤 Subir archivo</div>
+            
+            <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+                <div class="upload-icon">📁</div>
+                <p><strong>Click para seleccionar</strong> o arrastra archivos aquí</p>
+                <p style="color: #999; margin-top: 10px; font-size: 0.9em;">
+                    Archivo seleccionado: <span id="selectedFileName">Ninguno</span>
+                </p>
+            </div>
+
+            <input type="file" id="fileInput" onchange="handleFileSelect(event)">
+
+            <div class="tag-input-container">
+                <input 
+                    type="text" 
+                    class="search-input" 
+                    id="tagInput" 
+                    placeholder="Añadir tags (ej: trabajo, importante)..."
+                    onkeypress="handleTagInput(event)"
+                >
+                <button class="btn btn-secondary btn-small" onclick="addTag()">
+                    ➕ Añadir
+                </button>
+            </div>
+
+            <div class="tags-display" id="uploadTags"></div>
+
+            <div style="display: flex; gap: 10px; margin-top: 25px;">
+                <button class="btn btn-primary" onclick="uploadFile()" style="flex: 1;">
+                    ✅ Subir archivo
+                </button>
+                <button class="btn btn-secondary" onclick="closeUploadModal()" style="flex: 1;">
+                    ❌ Cancelar
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de edición de tags -->
+    <div class="modal" id="editModal">
+        <div class="modal-content">
+            <div class="modal-header">✏️ Editar tags</div>
+            
+            <p style="margin-bottom: 15px;"><strong>Archivo:</strong> <span id="editFileName"></span></p>
+
+            <div class="tag-input-container">
+                <input 
+                    type="text" 
+                    class="search-input" 
+                    id="editTagInput" 
+                    placeholder="Añadir nuevo tag..."
+                    onkeypress="handleEditTagInput(event)"
+                >
+                <button class="btn btn-secondary btn-small" onclick="addEditTag()">
+                    ➕ Añadir
+                </button>
+            </div>
+
+            <div class="tags-display" id="editTags"></div>
+
+            <div style="display: flex; gap: 10px; margin-top: 25px;">
+                <button class="btn btn-primary" onclick="saveEditTags()" style="flex: 1;">
+                    💾 Guardar
+                </button>
+                <button class="btn btn-secondary" onclick="closeEditModal()" style="flex: 1;">
+                    ❌ Cancelar
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notificación -->
+    <div class="notification" id="notification">
+        <span id="notificationIcon"></span>
+        <span id="notificationMessage"></span>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8000';
+        let allFiles = [];
+        let selectedTags = [];
+        let uploadTags = [];
+        let editingFile = null;
+        let editTags = [];
+        let selectedFile = null;
+        let selectedFilters = new Set();
+
+        // Inicializar
+        async function init() {
+            loadTheme(); // Cargar tema guardado primero
+            await loadFiles();
+            await loadStats();
+            await loadPopularTags();
+            setupDragAndDrop();
+        }
+
+        // Cargar archivos
+        async function loadFiles(tags = null) {
+            try {
+                const url = tags ? `${API_URL}/files?tags=${tags}` : `${API_URL}/files`;
+                const response = await fetch(url);
+                allFiles = await response.json();
+                renderFiles();
+            } catch (error) {
+                showNotification('Error al cargar archivos', 'error');
+                console.error(error);
+            }
+        }
+
+        // Renderizar archivos
+        function renderFiles() {
+            const container = document.getElementById('filesContainer');
+            
+            if (allFiles.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📭</div>
+                        <h2>No hay archivos</h2>
+                        <p>Sube tu primer archivo para comenzar</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = `<div class="files-grid">${allFiles.map(file => `
+                <div class="file-card">
+                    <div class="file-icon">${getFileIcon(file.name)}</div>
+                    <div class="file-name">${file.name}</div>
+                    <div class="file-size">${formatBytes(file.size)}</div>
+                    <div class="file-tags">
+                        ${file.tags.map(tag => `<span class="file-tag">${tag}</span>`).join('')}
+                    </div>
+                    <div class="file-actions">
+                        <button class="btn btn-info btn-small" onclick="downloadFile('${file.name}')">
+                            ⬇️ Descargar
+                        </button>
+                        <button class="btn btn-secondary btn-small" onclick="openEditModal('${file.name}', ${JSON.stringify(file.tags).replace(/"/g, '&quot;')})">
+                            ✏️ Editar
+                        </button>
+                        <button class="btn btn-danger btn-small" onclick="deleteFile('${file.name}')">
+                            🗑️
+                        </button>
+                    </div>
+                </div>
+            `).join('')}</div>`;
+        }
+
+        // Icono según extensión
+        function getFileIcon(filename) {
+            const ext = filename.split('.').pop().toLowerCase();
+            const icons = {
+                pdf: '📄', doc: '📝', docx: '📝', txt: '📝',
+                jpg: '🖼️', jpeg: '🖼️', png: '🖼️', gif: '🖼️',
+                mp4: '🎥', avi: '🎥', mov: '🎥',
+                mp3: '🎵', wav: '🎵',
+                zip: '📦', rar: '📦',
+                xlsx: '📊', xls: '📊', csv: '📊'
+            };
+            return icons[ext] || '📄';
+        }
+
+        // Formatear bytes
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        // Cargar estadísticas
+        async function loadStats() {
+            try {
+                const response = await fetch(`${API_URL}/stats`);
+                const stats = await response.json();
+                document.getElementById('totalFiles').textContent = stats.total_files;
+                document.getElementById('totalTags').textContent = stats.total_tags;
+                document.getElementById('totalSize').textContent = stats.total_size_mb + ' MB';
+            } catch (error) {
+                console.error('Error al cargar estadísticas:', error);
+            }
+        }
+
+        // Cargar tags populares
+        async function loadPopularTags() {
+            try {
+                const response = await fetch(`${API_URL}/tags`);
+                const data = await response.json();
+                const container = document.getElementById('popularTags');
+                
+                if (data.tags.length === 0) {
+                    container.innerHTML = '<span style="color: #999;">No hay tags todavía</span>';
+                    return;
+                }
+
+                container.innerHTML = data.tags.slice(0, 10).map(tag => `
+                    <span class="tag-chip ${selectedFilters.has(tag.name) ? 'selected' : ''}" 
+                          onclick="toggleFilter('${tag.name}')">
+                        ${tag.name} (${tag.count})
+                    </span>
+                `).join('');
+            } catch (error) {
+                console.error('Error al cargar tags:', error);
+            }
+        }
+
+        // Toggle filtro
+        function toggleFilter(tag) {
+            if (selectedFilters.has(tag)) {
+                selectedFilters.delete(tag);
+            } else {
+                selectedFilters.add(tag);
+            }
+            
+            if (selectedFilters.size > 0) {
+                const tags = Array.from(selectedFilters).join(',');
+                loadFiles(tags);
+            } else {
+                loadFiles();
+            }
+            
+            loadPopularTags();
+        }
+
+        // Búsqueda
+        document.getElementById('searchInput').addEventListener('keyup', function(e) {
+            if (e.key === 'Enter') {
+                const tags = this.value.trim();
+                if (tags) {
+                    loadFiles(tags);
+                } else {
+                    loadFiles();
+                }
+            }
+        });
+
+        function clearSearch() {
+            document.getElementById('searchInput').value = '';
+            selectedFilters.clear();
+            loadFiles();
+            loadPopularTags();
+        }
+
+        // Drag and drop
+        function setupDragAndDrop() {
+            const zone = document.getElementById('uploadZone');
+            
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                zone.addEventListener(eventName, preventDefaults, false);
+            });
+
+            function preventDefaults(e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+
+            ['dragenter', 'dragover'].forEach(eventName => {
+                zone.addEventListener(eventName, () => zone.classList.add('dragging'), false);
+            });
+
+            ['dragleave', 'drop'].forEach(eventName => {
+                zone.addEventListener(eventName, () => zone.classList.remove('dragging'), false);
+            });
+
+            zone.addEventListener('drop', handleDrop, false);
+        }
+
+        function handleDrop(e) {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            if (files.length > 0) {
+                selectedFile = files[0];
+                document.getElementById('selectedFileName').textContent = files[0].name;
+            }
+        }
+
+        function handleFileSelect(e) {
+            if (e.target.files.length > 0) {
+                selectedFile = e.target.files[0];
+                document.getElementById('selectedFileName').textContent = e.target.files[0].name;
+            }
+        }
+
+        // Modal de subida
+        function openUploadModal() {
+            document.getElementById('uploadModal').classList.add('active');
+            uploadTags = [];
+            selectedFile = null;
+            document.getElementById('selectedFileName').textContent = 'Ninguno';
+            document.getElementById('tagInput').value = '';
+            document.getElementById('uploadTags').innerHTML = '';
+        }
+
+        function closeUploadModal() {
+            document.getElementById('uploadModal').classList.remove('active');
+        }
+
+        function handleTagInput(e) {
+            if (e.key === 'Enter') {
+                addTag();
+            }
+        }
+
+        function addTag() {
+            const input = document.getElementById('tagInput');
+            const tags = input.value.split(',').map(t => t.trim().toLowerCase()).filter(t => t);
+            
+            tags.forEach(tag => {
+                if (!uploadTags.includes(tag)) {
+                    uploadTags.push(tag);
+                }
+            });
+            
+            input.value = '';
+            renderUploadTags();
+        }
+
+        function renderUploadTags() {
+            const container = document.getElementById('uploadTags');
+            container.innerHTML = uploadTags.map(tag => `
+                <span class="tag-chip">
+                    ${tag}
+                    <span class="remove" onclick="removeUploadTag('${tag}')">✕</span>
+                </span>
+            `).join('');
+        }
+
+        function removeUploadTag(tag) {
+            uploadTags = uploadTags.filter(t => t !== tag);
+            renderUploadTags();
+        }
+
+        // Subir archivo
+        async function uploadFile() {
+            if (!selectedFile) {
+                showNotification('Por favor selecciona un archivo', 'error');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            formData.append('tags', uploadTags.join(','));
+
+            try {
+                const response = await fetch(`${API_URL}/files`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (response.ok) {
+                    showNotification('Archivo subido correctamente', 'success');
+                    closeUploadModal();
+                    await loadFiles();
+                    await loadStats();
+                    await loadPopularTags();
+                } else {
+                    showNotification('Error al subir archivo', 'error');
+                }
+            } catch (error) {
+                showNotification('Error de conexión', 'error');
+                console.error(error);
+            }
+        }
+
+        // Modal de edición
+        function openEditModal(filename, tags) {
+            editingFile = filename;
+            editTags = [...tags];
+            document.getElementById('editFileName').textContent = filename;
+            document.getElementById('editTagInput').value = '';
+            renderEditTags();
+            document.getElementById('editModal').classList.add('active');
+        }
+
+        function closeEditModal() {
+            document.getElementById('editModal').classList.remove('active');
+            editingFile = null;
+            editTags = [];
+        }
+
+        function handleEditTagInput(e) {
+            if (e.key === 'Enter') {
+                addEditTag();
+            }
+        }
+
+        function addEditTag() {
+            const input = document.getElementById('editTagInput');
+            const tags = input.value.split(',').map(t => t.trim().toLowerCase()).filter(t => t);
+            
+            tags.forEach(tag => {
+                if (!editTags.includes(tag)) {
+                    editTags.push(tag);
+                }
+            });
+            
+            input.value = '';
+            renderEditTags();
+        }
+
+        function renderEditTags() {
+            const container = document.getElementById('editTags');
+            container.innerHTML = editTags.map(tag => `
+                <span class="tag-chip">
+                    ${tag}
+                    <span class="remove" onclick="removeEditTag('${tag}')">✕</span>
+                </span>
+            `).join('');
+        }
+
+        function removeEditTag(tag) {
+            editTags = editTags.filter(t => t !== tag);
+            renderEditTags();
+        }
+
+        async function saveEditTags() {
+            try {
+                const response = await fetch(`${API_URL}/files/${editingFile}/tags`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ tags: editTags })
+                });
+
+                if (response.ok) {
+                    showNotification('Tags actualizados correctamente', 'success');
+                    closeEditModal();
+                    await loadFiles();
+                    await loadStats();
+                    await loadPopularTags();
+                } else {
+                    showNotification('Error al actualizar tags', 'error');
+                }
+            } catch (error) {
+                showNotification('Error de conexión', 'error');
+                console.error(error);
+            }
+        }
+
+        // Descargar archivo
+        function downloadFile(filename) {
+            window.open(`${API_URL}/files/${filename}`, '_blank');
+        }
+
+        // Eliminar archivo
+        async function deleteFile(filename) {
+            if (!confirm(`¿Estás seguro de eliminar "${filename}"?`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_URL}/files/${filename}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    showNotification('Archivo eliminado correctamente', 'success');
+                    await loadFiles();
+                    await loadStats();
+                    await loadPopularTags();
+                } else {
+                    showNotification('Error al eliminar archivo', 'error');
+                }
+            } catch (error) {
+                showNotification('Error de conexión', 'error');
+                console.error(error);
+            }
+        }
+
+        // Notificaciones
+        function showNotification(message, type = 'success') {
+            const notification = document.getElementById('notification');
+            const icon = document.getElementById('notificationIcon');
+            const msg = document.getElementById('notificationMessage');
+
+            icon.textContent = type === 'success' ? '✅' : '❌';
+            msg.textContent = message;
+            notification.className = `notification ${type} active`;
+
+            setTimeout(() => {
+                notification.classList.remove('active');
+            }, 3000);
+        }
+
+        // Dark Mode
+        function toggleDarkMode() {
+            const body = document.body;
+            const themeIcon = document.getElementById('themeIcon');
+            const themeText = document.getElementById('themeText');
+            
+            body.classList.toggle('dark-mode');
+            
+            const isDarkMode = body.classList.contains('dark-mode');
+            
+            // Actualizar icono y texto
+            themeIcon.textContent = isDarkMode ? '☀️' : '🌙';
+            themeText.textContent = isDarkMode ? 'Light Mode' : 'Dark Mode';
+            
+            // Guardar preferencia
+            localStorage.setItem('darkMode', isDarkMode ? 'enabled' : 'disabled');
+            
+            showNotification(
+                isDarkMode ? 'Modo oscuro activado' : 'Modo claro activado',
+                'success'
+            );
+        }
+
+        function loadTheme() {
+            const darkMode = localStorage.getItem('darkMode');
+            const themeIcon = document.getElementById('themeIcon');
+            const themeText = document.getElementById('themeText');
+            
+            if (darkMode === 'enabled') {
+                document.body.classList.add('dark-mode');
+                themeIcon.textContent = '☀️';
+                themeText.textContent = 'Light Mode';
+            }
+        }
+
+        // Iniciar app
+        init();
+    </script>
+</body>
+</html>
