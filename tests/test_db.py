@@ -2,8 +2,11 @@ import tempfile
 import os
 from db import FileStore
 
+# Tests unitarios para el sistema de archivos basado en tags
+
 
 def write_temp_file(dirpath, name, content=b'hello'):
+    """Crea un archivo temporal con contenido dado."""
     p = os.path.join(dirpath, name)
     with open(p, 'wb') as f:
         f.write(content)
@@ -11,6 +14,7 @@ def write_temp_file(dirpath, name, content=b'hello'):
 
 
 def test_add_and_list_files(tmp_path):
+    """Verifica que se puede agregar un archivo y listar sus tags correctamente."""
     base = tmp_path / 'data'
     base.mkdir()
 
@@ -31,6 +35,7 @@ def test_add_and_list_files(tmp_path):
 
 
 def test_files_matching_and_delete(tmp_path):
+    """Verifica la búsqueda por tags y el borrado de archivos."""
     base = tmp_path / 'data2'
     base.mkdir()
     store = FileStore(str(base))
@@ -57,6 +62,7 @@ def test_files_matching_and_delete(tmp_path):
 
 
 def test_add_and_remove_tags_edge_cases(tmp_path):
+    """Prueba casos límite al agregar y eliminar tags, incluyendo la eliminación total de un archivo."""
     base = tmp_path / 'data3'
     base.mkdir()
     store = FileStore(str(base))
