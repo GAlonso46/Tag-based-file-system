@@ -1,20 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { fetchStats, fetchPopularTags } from '../services/api';
+import { useAuth } from '../context/AuthContext';
 
 export const useStats = () => {
     const [stats, setStats] = useState({ total_files: 0, total_size: 0, total_tags: 0 });
     const [popularTags, setPopularTags] = useState([]);
     const [loading, setLoading] = useState(true);
+    const { user } = useAuth(); // Agregar usuario para detectar cambios
 
-    useEffect(() => {
-        loadStats();
-        loadPopularTags();
-    }, []);
-
-    const loadStats = async () => {
+    const loadStats = useCallback(async () => {
         try {
             const data = await fetchStats();
-            console.log('📊 Stats recibidas del API:', data); // Debug
+            console.log('📊 Stats recibidas del API para usuario:', user?.username, data); // Debug
             
             // Normalizar los datos (el API devuelve total_size_bytes)
             const normalizedStats = {
@@ -27,12 +24,12 @@ export const useStats = () => {
         } catch (err) {
             console.error('❌ Error loading stats:', err);
         }
-    };
+    }, [user]);
 
-    const loadPopularTags = async () => {
+    const loadPopularTags = useCallback(async () => {
         try {
             const data = await fetchPopularTags();
-            console.log('🏷️ Tags recibidos del API:', data); // Debug
+            console.log('🏷️ Tags recibidos del API para usuario:', user?.username, data); // Debug
             
             // API devuelve {tags: [{name, count}], total: N}
             const tagsArray = data.tags || data || [];
@@ -50,7 +47,12 @@ export const useStats = () => {
         } finally {
             setLoading(false);
         }
-    };
+    }, [user]);
+
+    useEffect(() => {
+        loadStats();
+        loadPopularTags();
+    }, [loadStats, loadPopularTags]); // Ahora incluir las funciones como dependencias
 
     const refresh = () => {
         loadStats();

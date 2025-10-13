@@ -29,6 +29,20 @@ export const FileCard = ({ file, onEdit, onDelete }) => {
             <div className="file-name" title={filename}>{filename}</div>
             <div className="file-size">{formatBytes(file.size)}</div>
             
+            {/* Mostrar propietario si está disponible (solo para admins) */}
+            {file.owner && (
+                <div style={{
+                    fontSize: '0.8em',
+                    color: 'var(--text-secondary)',
+                    marginTop: '4px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                }}>
+                    👤 <span style={{ fontWeight: '500' }}>{file.owner}</span>
+                </div>
+            )}
+            
             <div className="file-tags">
                 {(file.tags || []).map(tag => (
                     <span key={tag} className="file-tag">{tag}</span>

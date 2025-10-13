@@ -1,19 +1,21 @@
 import { useState, useEffect, useCallback } from 'react';
 import { fetchFiles, uploadFile, updateFileTags, deleteFile } from '../services/api';
 import { useNotification } from '../context/NotificationContext';
+import { useAuth } from '../context/AuthContext';
 
 export const useFiles = () => {
     const [files, setFiles] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const { showNotification } = useNotification();
+    const { user } = useAuth(); // Agregar usuario para detectar cambios
 
     const loadFiles = useCallback(async (tags = null) => {
         setLoading(true);
         setError(null);
         try {
             const data = await fetchFiles(tags);
-            console.log('📁 Archivos cargados:', data); // Debug
+            console.log('📁 Archivos cargados para usuario:', user?.username, data); // Debug
             setFiles(Array.isArray(data) ? data : []);
         } catch (err) {
             console.error('❌ Error al cargar archivos:', err);
@@ -23,7 +25,7 @@ export const useFiles = () => {
         } finally {
             setLoading(false);
         }
-    }, [showNotification]);
+    }, [showNotification, user]); // Agregar user como dependencia
 
     useEffect(() => {
         loadFiles();

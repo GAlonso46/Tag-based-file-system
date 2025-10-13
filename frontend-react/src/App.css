@@ -4,9 +4,53 @@
   padding: 20px;
 }
 
+/* Tabs de vista */
+.view-tabs {
+  display: flex;
+  gap: 10px;
+  margin: 20px 0;
+  padding: 0 20px;
+}
+
+.view-tabs .tab {
+  padding: 12px 24px;
+  background: var(--card-bg);
+  border: 2px solid var(--border-color);
+  border-radius: 10px;
+  font-size: 1em;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.view-tabs .tab:hover {
+  border-color: #667eea;
+  color: #667eea;
+  transform: translateY(-2px);
+}
+
+.view-tabs .tab.active {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-color: transparent;
+  color: white;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+}
+
 @media (max-width: 768px) {
   .container {
     padding: 10px;
   }
+  
+  .view-tabs {
+    padding: 0 10px;
+  }
+  
+  .view-tabs .tab {
+    flex: 1;
+    padding: 10px 16px;
+    font-size: 0.9em;
+  }
 }
+
 

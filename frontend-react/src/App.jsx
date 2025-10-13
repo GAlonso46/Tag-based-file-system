@@ -6,16 +6,21 @@ import { FileGrid } from './components/FileGrid';
 import { UploadModal } from './components/UploadModal';
 import { EditModal } from './components/EditModal';
 import { Notification } from './components/Notification';
+import { LoginPage } from './components/LoginPage';
+import { Analytics } from './components/Analytics';
 import { useFiles } from './hooks/useFiles';
 import { useStats } from './hooks/useStats';
+import { useAuth } from './context/AuthContext';
 import './App.css';
 
 function App() {
+  const { isAuthenticated, loading: authLoading, user } = useAuth();
   const { files, loading, upload, updateTags, remove } = useFiles();
   const { refresh: refreshStats } = useStats();
   const [filteredFiles, setFilteredFiles] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedTags, setSelectedTags] = useState([]);
+  const [currentView, setCurrentView] = useState('files'); // 'files' o 'analytics'
   
   // Modales
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
@@ -81,21 +86,66 @@ function App() {
     return success;
   };
 
+  // Si está cargando la autenticación, no mostramos nada aún
+  if (authLoading) {
+    return (
+      <div className="container" style={{ 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        height: '100vh' 
+      }}>
+        <p>Cargando...</p>
+      </div>
+    );
+  }
+
+  // Si no está autenticado, mostramos la página de login
+  if (!isAuthenticated) {
+    return <LoginPage />;
+  }
+
   return (
     <div className="container">
       <Header />
       <Stats />
-      <Toolbar 
-        onSearch={handleSearch}
-        onFilterByTag={handleFilterByTag}
-        onOpenUpload={() => setUploadModalOpen(true)}
-      />
-      <FileGrid 
-        files={filteredFiles}
-        loading={loading}
-        onEdit={handleEdit}
-        onDelete={handleDelete}
-      />
+      
+      {/* Tabs de navegación (solo mostrar Analytics si es admin) */}
+      <div className="view-tabs">
+        <button 
+          className={`tab ${currentView === 'files' ? 'active' : ''}`}
+          onClick={() => setCurrentView('files')}
+        >
+          📁 Archivos
+        </button>
+        {user?.is_admin && (
+          <button 
+            className={`tab ${currentView === 'analytics' ? 'active' : ''}`}
+            onClick={() => setCurrentView('analytics')}
+          >
+            📊 Analytics
+          </button>
+        )}
+      </div>
+
+      {/* Vista condicional */}
+      {currentView === 'files' ? (
+        <>
+          <Toolbar 
+            onSearch={handleSearch}
+            onFilterByTag={handleFilterByTag}
+            onOpenUpload={() => setUploadModalOpen(true)}
+          />
+          <FileGrid 
+            files={filteredFiles}
+            loading={loading}
+            onEdit={handleEdit}
+            onDelete={handleDelete}
+          />
+        </>
+      ) : (
+        <Analytics />
+      )}
 
       <UploadModal 
         isOpen={uploadModalOpen}
