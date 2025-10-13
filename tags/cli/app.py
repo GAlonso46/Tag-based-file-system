@@ -4,6 +4,7 @@ import shlex
 import sys
 from tags.core.tag_service import TagService
 from tags.utils.helpers import normalize_tags, unquote, split_input_preserve_quotes
+from tags.cli.api_sync import APISync
 
 _PROMPT = """Tags-based FS (centralized)
 Commands:
@@ -31,7 +32,7 @@ def _do_non_interactive(rest, service: TagService):
     print('Invalid or unsupported non-interactive command')
     return True
 
-def repl(service: TagService):
+def repl(service: TagService, api_sync: APISync = None):
     print(_PROMPT)
     while True:
         try:
@@ -63,11 +64,17 @@ def repl(service: TagService):
                 print(f)
             added = service.add_files(files, tags_raw)
             print('Added:', added)
+            # Sincronizar con la BD
+            if api_sync:
+                api_sync.sync_to_database()
             continue
         if cmd == 'delete' and len(parts) >= 2:
             tags = normalize_tags(parts[1])
             deleted = service.delete_by_tags(tags)
             print('Deleted:', deleted)
+            # Sincronizar con la BD después de eliminar
+            if api_sync:
+                api_sync.sync_to_database()
             continue
         if cmd == 'list' and len(parts) >= 2:
             tags = normalize_tags(parts[1])
@@ -80,12 +87,18 @@ def repl(service: TagService):
             add = parts[2]
             updated = service.add_tags_to_query(q, add)
             print('Updated:', updated)
+            # Sincronizar con la BD después de modificar tags
+            if api_sync:
+                api_sync.sync_to_database()
             continue
         if cmd == 'delete-tags' and len(parts) >= 3:
             q = parts[1]
             rem = parts[2]
             updated = service.remove_tags_from_query(q, rem)
             print('Updated:', updated)
+            # Sincronizar con la BD después de eliminar tags
+            if api_sync:
+                api_sync.sync_to_database()
             continue
         print('Unknown command')
 
@@ -94,10 +107,18 @@ def main(argv=None):
     parser.add_argument('--data-dir', '-d', default='./tags_data')
     args, rest = parser.parse_known_args(argv)
     service = TagService(args.data_dir)
+    
+    # Inicializar sincronización con la API
+    api_sync = APISync()
+    
+    # Sincronizar archivos existentes al iniciar
+    if api_sync.enabled:
+        print("🔄 Sincronizando archivos existentes con la BD...")
+        api_sync.sync_to_database()
 
     if not rest:
         # interactive
-        repl(service)
+        repl(service, api_sync)
         return
 
     # single command mode

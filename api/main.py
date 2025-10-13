@@ -186,6 +186,9 @@ async def list_files(
     - **tags**: Tags para filtrar, separados por comas (AND logic)
     """
     try:
+        # Recargar files.json por si fue modificado por el CLI
+        tag_service.store.reload_meta()
+        
         if tags:
             # Filtrar por tags
             files_with_tags = tag_service.list_by_tags(tags)
@@ -418,6 +421,9 @@ async def get_all_tags(
     Obtener todos los tags únicos (admin: todos, usuario: solo de sus archivos)
     """
     try:
+        # Recargar files.json por si fue modificado por el CLI
+        tag_service.store.reload_meta()
+        
         files_with_tags = tag_service.show_all()
         
         # Filtrar archivos según usuario
@@ -678,6 +684,133 @@ async def analytics_user_stats(
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al obtener analytics: {str(e)}")
+
+
+# ==================== ENDPOINTS PARA CLI (SIN AUTENTICACIÓN) ====================
+# Estos endpoints sincronizan files.json con la BD, asignando archivos al admin
+
+@app.post("/cli/sync", tags=["CLI"])
+async def cli_sync_files(db: Session = Depends(get_db)):
+    """
+    Sincroniza todos los archivos de files.json con la BD (asignados al admin)
+    
+    Este endpoint es para uso del CLI únicamente.
+    Lee files.json y crea registros en la BD para archivos que no existan.
+    """
+    try:
+        # Recargar files.json desde disco antes de sincronizar
+        tag_service.store.reload_meta()
+        
+        # Obtener el usuario admin (primer usuario con is_admin=1)
+        admin_user = db.query(User).filter(User.is_admin == 1).first()
+        
+        if not admin_user:
+            raise HTTPException(
+                status_code=500, 
+                detail="No existe usuario admin en la BD. Ejecuta migrate_admin.py primero."
+            )
+        
+        # Leer todos los archivos de files.json
+        files_with_tags = tag_service.show_all()
+        files_dir = Path(DATA_DIR) / "files"
+        
+        synced_count = 0
+        skipped_count = 0
+        
+        for filename, tags in files_with_tags:
+            file_path = files_dir / filename
+            
+            # Verificar si el archivo existe físicamente
+            if not file_path.exists():
+                skipped_count += 1
+                continue
+            
+            # Verificar si ya existe en la BD
+            existing_file = db.query(FileDB).filter(FileDB.filename == filename).first()
+            
+            if not existing_file:
+                # Crear nuevo registro asignado al admin
+                import json
+                file_size = file_path.stat().st_size
+                
+                new_file = FileDB(
+                    filename=filename,
+                    original_filename=filename,
+                    owner_id=admin_user.id,
+                    tags=json.dumps(tags),
+                    size=file_size,
+                    mime_type="application/octet-stream"
+                )
+                db.add(new_file)
+                synced_count += 1
+            else:
+                skipped_count += 1
+        
+        db.commit()
+        
+        return {
+            "message": "Sincronización completada",
+            "admin_user": admin_user.username,
+            "synced": synced_count,
+            "skipped": skipped_count,
+            "total": synced_count + skipped_count
+        }
+    
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error en sincronización: {str(e)}")
+
+
+@app.get("/cli/files", tags=["CLI"])
+async def cli_list_files(tags: Optional[str] = None):
+    """
+    Listar archivos desde files.json (sin autenticación, para CLI)
+    
+    - **tags**: Tags para filtrar, separados por comas
+    """
+    try:
+        # Recargar files.json desde disco antes de listar
+        tag_service.store.reload_meta()
+        
+        if tags:
+            files_with_tags = tag_service.list_by_tags(tags)
+        else:
+            files_with_tags = tag_service.show_all()
+        
+        result = []
+        files_dir = Path(DATA_DIR) / "files"
+        
+        for filename, file_tags in files_with_tags:
+            file_path = files_dir / filename
+            if file_path.exists():
+                result.append({
+                    "name": filename,
+                    "tags": file_tags,
+                    "size": file_path.stat().st_size,
+                    "url": f"/files/{filename}"
+                })
+        
+        return result
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar archivos: {str(e)}")
+
+
+@app.get("/cli/tags", tags=["CLI"])
+async def cli_list_tags():
+    """
+    Listar todos los tags desde files.json (sin autenticación, para CLI)
+    """
+    try:
+        # Recargar files.json desde disco antes de listar
+        tag_service.store.reload_meta()
+        
+        all_tags = tag_service.get_all_tags()
+        return {"tags": sorted(all_tags)}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar tags: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn

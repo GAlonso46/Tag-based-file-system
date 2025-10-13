@@ -53,6 +53,8 @@ services:
     networks:
       - tagfs-overlay
     volumes:
+      # Compartir el mismo volumen de datos con el backend
+      - tagfs-data:/app/tags_data
       # Montar una carpeta compartida para subir archivos
       - cli-files:/uploads
     environment:

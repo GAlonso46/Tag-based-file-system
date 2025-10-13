@@ -42,6 +42,10 @@ class FileStore:
             json.dump(self._meta, fh, indent=2, ensure_ascii=False)
         tmp.replace(self.meta_path)
 
+    def reload_meta(self):
+        """Recarga el archivo files.json desde el disco"""
+        self._load_meta()
+    
     @property
     def meta(self):
         """Devuelve el diccionario meta (filename -> [tags])"""
