@@ -20,7 +20,44 @@ Sistema de gestión de archivos basado en etiquetas con interfaz web moderna y A
 
 ## 🚀 Inicio Rápido
 
-### Opción A: Script Automático (Más Fácil) ⭐
+### Opción A: Docker Compose (Recomendado para Producción) 🐳
+
+```bash
+# 1. Construir imágenes
+docker-compose build
+
+# 2. Iniciar servicios
+docker-compose up -d
+
+# 3. Verificar estado
+docker-compose ps
+```
+
+La aplicación estará disponible en:
+- 🌐 **Frontend**: http://localhost
+- 📡 **Backend API**: http://localhost:8000
+- 📚 **API Docs**: http://localhost:8000/docs
+
+**Para detener:**
+```bash
+docker-compose down
+```
+
+### Opción B: Docker Swarm (2 PCs Distribuidas) 🌐
+
+Ver [**DOCKER_SWARM_GUIDE.md**](DOCKER_SWARM_GUIDE.md) para instrucciones completas.
+
+```bash
+# Construir imágenes
+./build-images.sh  # Linux/Mac
+# o
+.\build-images.ps1  # Windows
+
+# Desplegar en Swarm
+docker stack deploy -c docker-stack.yml tagfs
+```
+
+### Opción C: Script Automático (Desarrollo Local) ⭐
 
 ```powershell
 # 1. Instalar dependencias (solo la primera vez)
@@ -35,7 +72,7 @@ pip install -r requirements.txt
 - ✅ Espera a que esté lista
 - ✅ Abre el frontend automáticamente
 
-### Opción B: Manual (Más Control)
+### Opción D: Manual (Más Control)
 
 **⚠️ IMPORTANTE: Necesitas 2 terminales separadas**
 

@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # Backend API
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: tagfs-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persistir datos de archivos
+      - ./tags_data:/app/tags_data
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - tagfs-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend React
+  frontend:
+    build:
+      context: ./frontend-react
+      dockerfile: Dockerfile
+    container_name: tagfs-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - tagfs-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  tagfs-network:
+    driver: bridge
+
+volumes:
+  tagfs-data:
