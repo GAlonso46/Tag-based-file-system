@@ -2,6 +2,7 @@
 
 Proyecto independiente (centralizado) para la 1ra entrega.
 
+
 Ejecutar la interfaz interactiva:
 
 ```powershell
