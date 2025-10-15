@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  backend:
+    image: tagfs-backend:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - tagfs-data:/app/tags_data
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - tagfs-overlay
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == Ubuntu  # Solo en tu VM
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+networks:
+  tagfs-overlay:
+    driver: overlay
+    attachable: true
+    external: true
+
+volumes:
+  tagfs-data:
+    driver: local
