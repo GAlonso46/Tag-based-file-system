@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  cli:
+    image: tagfs-cli:latest
+    networks:
+      - tagfs-overlay
+    volumes:
+      # Compartir el mismo volumen de datos con el backend
+      - backend_tagfs-data:/app/tags_data
+      # Montar una carpeta compartida para subir archivos
+      - cli-files:/uploads
+    environment:
+      - PYTHONUNBUFFERED=1
+      - API_URL=http://backend:8000
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          # Debe correr en el mismo nodo que el backend (donde está el volumen)
+          - node.hostname == Ubuntu  # Corre en tu nodo
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 128M
+    # Mantener el contenedor vivo
+    stdin_open: true
+    tty: true
+
+networks:
+  tagfs-overlay:
+    external: true
+
+volumes:
+  backend_tagfs-data:
+    external: true
+  cli-files:
+    driver: local

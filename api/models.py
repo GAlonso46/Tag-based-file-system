@@ -28,6 +28,9 @@ class FileDB(Base):
     """
     Modelo de Archivo en BD
     Almacena metadata de archivos y su relación con usuarios
+    
+    Incluye optimistic locking con campo 'version' para prevenir
+    conflictos de edición concurrente
     """
     __tablename__ = "files"
     
@@ -38,6 +41,7 @@ class FileDB(Base):
     tags = Column(Text, default="")  # JSON string de tags: '["tag1", "tag2"]'
     size = Column(Integer, default=0)  # Tamaño en bytes
     mime_type = Column(String(100), nullable=True)  # Tipo MIME del archivo
+    version = Column(Integer, default=1, nullable=False)  # Para optimistic locking
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

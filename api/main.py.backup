@@ -1,0 +1,259 @@
+"""
+FastAPI REST API - Sistema distribuido con solo PostgreSQL
+"""
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Depends
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from typing import List, Optional
+from pydantic import BaseModel
+import json
+from pathlib import Path
+from sqlalchemy.orm import Session
+
+from .database import engine, Base, get_db
+from .models import User, FileDB
+from . import auth
+from .dependencies import get_current_active_user
+
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(
+    title="Tag-Based File System API",
+    version="3.0.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth.router)
+
+FILES_DIR = Path("./files_storage")
+FILES_DIR.mkdir(exist_ok=True)
+
+class FileInfo(BaseModel):
+    name: str
+    tags: List[str]
+
+class TagsUpdate(BaseModel):
+    tags: List[str]
+
+class FileResponse(BaseModel):
+    name: str
+    tags: List[str]
+    size: int
+    url: str
+    owner: Optional[str] = None
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Tag-Based File System API"}
+
+@app.post("/files", response_model=FileResponse)
+async def upload_file(
+    file: UploadFile = File(...),
+    tags: str = Form(default=""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        content = await file.read()
+        filename = file.filename
+        
+        file_path = FILES_DIR / filename
+        file_path.write_bytes(content)
+        
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+        
+        file_db = FileDB(
+            filename=filename,
+            original_filename=filename,
+            owner_id=current_user.id,
+            tags=json.dumps(tag_list),
+            size=len(content),
+            mime_type=file.content_type or "application/octet-stream"
+        )
+        db.add(file_db)
+        db.commit()
+        db.refresh(file_db)
+        
+        return FileResponse(
+            name=filename,
+            tags=tag_list,
+            size=len(content),
+            url=f"/files/{filename}"
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/files", response_model=List[FileResponse])
+async def list_files(
+    tags: Optional[str] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.is_admin == 1:
+        query = db.query(FileDB)
+    else:
+        query = db.query(FileDB).filter(FileDB.owner_id == current_user.id)
+    
+    files = query.all()
+    
+    if tags:
+        search_tags = [t.strip().lower() for t in tags.split(",") if t.strip()]
+        filtered = []
+        for f in files:
+            file_tags = [t.lower() for t in json.loads(f.tags)] if f.tags else []
+            if all(tag in file_tags for tag in search_tags):
+                filtered.append(f)
+        files = filtered
+    
+    result = []
+    for f in files:
+        file_tags = json.loads(f.tags) if f.tags else []
+        owner_name = None
+        if current_user.is_admin == 1 and f.owner:
+            owner_name = f.owner.username
+        
+        result.append(FileResponse(
+            name=f.filename,
+            tags=file_tags,
+            size=f.size,
+            url=f"/files/{f.filename}",
+            owner=owner_name
+        ))
+    
+    return result
+
+@app.get("/files/{filename}")
+async def download_file(
+    filename: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    file_db = db.query(FileDB).filter(FileDB.filename == filename).first()
+    if not file_db:
+        raise HTTPException(status_code=404, detail="Not found")
+    
+    if current_user.is_admin != 1 and file_db.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    file_path = FILES_DIR / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(path=file_path, filename=filename)
+
+@app.delete("/files/{filename}")
+async def delete_file(
+    filename: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    file_db = db.query(FileDB).filter(FileDB.filename == filename).first()
+    if not file_db:
+        raise HTTPException(status_code=404, detail="Not found")
+    
+    if current_user.is_admin != 1 and file_db.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    file_path = FILES_DIR / filename
+    if file_path.exists():
+        file_path.unlink()
+    
+    db.delete(file_db)
+    db.commit()
+    
+    return {"message": f"Deleted {filename}"}
+
+@app.patch("/files/{filename}/tags")
+async def update_tags(
+    filename: str,
+    tags_update: TagsUpdate,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    file_db = db.query(FileDB).filter(FileDB.filename == filename).first()
+    if not file_db:
+        raise HTTPException(status_code=404, detail="Not found")
+    
+    if current_user.is_admin != 1 and file_db.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    file_db.tags = json.dumps(tags_update.tags)
+    db.commit()
+    
+    return {"message": "Updated", "filename": filename, "tags": tags_update.tags}
+
+@app.get("/tags")
+async def get_tags(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.is_admin == 1:
+        files = db.query(FileDB).all()
+    else:
+        files = db.query(FileDB).filter(FileDB.owner_id == current_user.id).all()
+    
+    tag_count = {}
+    for f in files:
+        if f.tags:
+            for tag in json.loads(f.tags):
+                tag_count[tag] = tag_count.get(tag, 0) + 1
+    
+    sorted_tags = sorted(tag_count.items(), key=lambda x: x[1], reverse=True)
+    return {
+        "tags": [{"name": t, "count": c} for t, c in sorted_tags],
+        "total": len(sorted_tags)
+    }
+
+@app.get("/stats")
+async def get_stats(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.is_admin == 1:
+        files = db.query(FileDB).all()
+    else:
+        files = db.query(FileDB).filter(FileDB.owner_id == current_user.id).all()
+    
+    all_tags = set()
+    total_size = 0
+    for f in files:
+        if f.tags:
+            all_tags.update(json.loads(f.tags))
+        total_size += f.size
+    
+    return {
+        "total_files": len(files),
+        "total_tags": len(all_tags),
+        "total_size_bytes": total_size,
+        "total_size_mb": round(total_size / (1024 * 1024), 2)
+    }
+
+# Analytics endpoints...
+@app.get("/analytics/user-stats")
+async def user_stats(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.is_admin != 1:
+        raise HTTPException(status_code=403, detail="Admin only")
+    
+    users = db.query(User).all()
+    stats = []
+    for u in users:
+        stats.append({
+            "username": u.username,
+            "email": u.email,
+            "is_admin": u.is_admin == 1,
+            "file_count": len(u.files),
+            "total_size_mb": round(sum(f.size for f in u.files) / (1024*1024), 2)
+        })
+    
+    return {"users": stats, "total_users": len(users)}
