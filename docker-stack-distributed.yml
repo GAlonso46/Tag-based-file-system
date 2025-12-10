@@ -1,35 +1,58 @@
 version: '3.8'
 
 services:
-  # Backend API - Corre en el Manager (tu VM)
-  backend:
+  # 1. Gateway (Interface)
+  gateway:
     image: tagfs-backend:latest
+    command: ["uvicorn", "services.gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
-    volumes:
-      - tagfs-data:/app/tags_data
     environment:
-      - PYTHONUNBUFFERED=1
+      - METADATA_HOST=metadata
+      - METADATA_PORT=50051
     networks:
       - tagfs-overlay
     deploy:
       replicas: 1
       placement:
-        constraints:
-          - node.role == manager  # Solo en el nodo manager
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
-        reservations:
-          cpus: '0.25'
-          memory: 256M
+        constraints: [node.role == manager]
 
-  # Frontend React - Corre en el Worker (PC de tu compañera)
+  # 2. Metadata Service (Control)
+  metadata:
+    image: tagfs-backend:latest
+    command: ["python", "services/metadata/main.py"]
+    networks:
+      - tagfs-overlay
+    environment:
+      - PORT=50051
+      - MULTICAST_PORT=5000
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - metadata-store:/app/metadata_storage
+
+  # 3. DataNodes (Storage)
+  datanode:
+    image: tagfs-backend:latest
+    command: ["python", "services/datanode/main.py"]
+    networks:
+      - tagfs-overlay
+    environment:
+      - PORT=50051
+      - MULTICAST_PORT=5000
+      # Random ID generation handled in code if NOT set, but let's try to set it via template if possible
+      # Docker Swarm doesn't easily template env vars per replica index without hacks.
+      # We rely on code generating unique ID based on hostname/time.
+    deploy:
+      replicas: 3
+      placement:
+        constraints: [node.role == worker]
+    volumes:
+      - datanode-store:/app/data_node_storage
+
+  # 4. Frontend
   frontend:
     image: tagfs-frontend:latest
     ports:
@@ -39,19 +62,7 @@ services:
     deploy:
       replicas: 1
       placement:
-        constraints:
-          - node.role == worker  # Solo en nodos workers
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
-      resources:
-        limits:
-          cpus: '0.25'
-          memory: 256M
-        reservations:
-          cpus: '0.1'
-          memory: 128M
+        constraints: [node.role == worker]
 
 networks:
   tagfs-overlay:
@@ -59,5 +70,5 @@ networks:
     attachable: true
 
 volumes:
-  tagfs-data:
-    driver: local
+  metadata-store:
+  datanode-store:

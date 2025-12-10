@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package tagfs;
+
+// ==================== SHARED MESSAGES ====================
+
+message FileMetadata {
+  string file_id = 1;
+  string filename = 2;
+  int64 size = 3;
+  repeated string tags = 4;
+  string mime_type = 5;
+  string owner_id = 6;
+  int64 created_at = 7; // Unix timestamp
+}
+
+message NodeInfo {
+  string node_id = 1;
+  string address = 2; // IP or Hostname
+  int32 port = 3;
+  // Stats
+  int64 free_space = 4;
+  int32 load_factor = 5; // 0-100% load
+}
+
+// ==================== DATA NODE SERVICE ====================
+// Runs on every storage node. Handles raw data IO.
+
+service DataNodeService {
+  // Check health (gRPC standard health check could also be used)
+  rpc Ping (PingRequest) returns (PingResponse);
+
+  // Write a file stream to disk
+  rpc StoreChunk (stream FileChunk) returns (StoreResponse);
+
+  // Read a file from disk
+  rpc RetrieveChunk (FileRequest) returns (stream FileChunk);
+
+  // Delete a file
+  rpc DeleteFile (FileRequest) returns (DeleteResponse);
+}
+
+message PingRequest {}
+message PingResponse {
+  string status = 1;
+  string node_id = 2;
+}
+
+message FileChunk {
+  string file_id = 1;
+  bytes content = 2;
+  int64 offset = 3; // For verifying order/integrity
+  bool is_last = 4;
+}
+
+message StoreResponse {
+  bool success = 1;
+  string message = 2;
+  int64 bytes_written = 3;
+}
+
+message FileRequest {
+  string file_id = 1;
+}
+
+message DeleteResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ==================== METADATA SERVICE ====================
+// Runs on the Manager node(s). Handles logic and coordination.
+
+service MetadataService {
+  // Gateway requests write allocation (Where should I put this file?)
+  // Returns N=3 DataNodes to write to.
+  rpc AssignWrite (WriteRequest) returns (WriteAllocation);
+
+  // Gateway confirms write success (Commit)
+  rpc CommitWrite (CommitRequest) returns (CommitResponse);
+
+  // Gateway requests file location (Where is this file?)
+  rpc LocateFile (FileRequest) returns (FileLocation);
+
+  // Metadata operations
+  rpc AddTags (TagRequest) returns (TagResponse);
+  rpc RemoveTags (TagRequest) returns (TagResponse);
+  rpc ListFiles (ListRequest) returns (ListResponse);
+}
+
+message WriteRequest {
+  string filename = 1;
+  int64 size = 2;
+  repeated string tags = 3;
+  string owner_id = 4;
+  string mime_type = 5;
+}
+
+message WriteAllocation {
+  string file_id = 1; // Generated UUID
+  repeated NodeInfo target_nodes = 2; // The 3 nodes to write to
+}
+
+message CommitRequest {
+  string file_id = 1;
+  int64 size = 2;
+  bool success = 3;
+}
+
+message CommitResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message FileLocation {
+  string file_id = 1;
+  FileMetadata metadata = 2;
+  repeated NodeInfo replica_nodes = 3; // Where copies actully exist
+}
+
+message TagRequest {
+  string file_id = 1;
+  repeated string tags = 2;
+}
+
+message TagResponse {
+  bool success = 1;
+  repeated string current_tags = 2;
+}
+
+message ListRequest {
+  repeated string tags_filter = 1; // Empty for all
+}
+
+message ListResponse {
+  repeated FileLocation files = 1;
+}

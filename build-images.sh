@@ -1,24 +1,23 @@
 #!/bin/bash
 
-# Script para construir todas las imágenes Docker
+# Stops on error
+set -e
 
-echo "🐳 Construyendo imágenes Docker..."
+echo -e "\n🐳 Building Docker images..."
 
 # Backend
-echo "📦 Construyendo Backend..."
+echo -e "\n📦 Building Backend..."
 docker build -f Dockerfile.backend -t tagfs-backend:latest .
 
 # Frontend
-echo "🎨 Construyendo Frontend..."
+echo -e "\n🎨 Building Frontend..."
 cd frontend-react
 docker build -t tagfs-frontend:latest .
 cd ..
 
-# Verificar
-echo "✅ Imágenes construidas:"
-docker images | grep tagfs
+# Verify
+echo -e "\n✅ Images built:"
+docker images | grep "tagfs"
 
-echo ""
-echo "🎉 ¡Listo! Ahora puedes:"
-echo "   - Desarrollo local: docker-compose up"
-echo "   - Docker Swarm: docker stack deploy -c docker-stack.yml tagfs"
+echo -e "\n🎉 Ready! You can now deploy:"
+echo "   docker stack deploy -c docker-stack-distributed.yml tagfs"
