@@ -3,7 +3,7 @@
 # Script to run distributed system tests integration
 
 # Default to localhost if not set
-export API_URL=${API_URL:-"http://localhost:8000"}
+export API_URL="${API_URL:-http://127.0.0.1:8000}"
 
 echo "🚀 Starting Distributed System Tests..."
 echo "Target API: $API_URL"

@@ -87,22 +87,35 @@ class DataNode(pb2_grpc.DataNodeServiceServicer):
         else:
             return pb2.DeleteResponse(success=False, message="Not found")
 
+def get_container_ip():
+    """Get the container's IP address in the overlay network"""
+    try:
+        # Try to resolve our own hostname to get the container IP
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+        return ip
+    except Exception as e:
+        print(f"Error getting container IP: {e}")
+        return "127.0.0.1"
+
 def heartbeat_sender():
-    """Sends UDP multicast packets to announce presence"""
+    """Sends UDP packets to announce presence with container IP"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
     
-    print(f"[{NODE_ID}] Specific ID sending heartbeats to {MULTICAST_GROUP}:{MULTICAST_PORT}")
+    # Get our container IP
+    container_ip = get_container_ip()
+    print(f"[{NODE_ID}] Container IP: {container_ip}", flush=True)
+    print(f"[{NODE_ID}] Sending heartbeats to {MULTICAST_GROUP}:{MULTICAST_PORT}", flush=True)
     
     while True:
         try:
-            # Message format: "NODE_ID|PORT|LOAD"
-            # Simple text protocol for heartbeats
-            msg = f"{NODE_ID}|{PORT}|0".encode('utf-8')
+            # Message format: "NODE_ID|IP|PORT|LOAD"
+            # Include our container IP in the message
+            msg = f"{NODE_ID}|{container_ip}|{PORT}|0".encode('utf-8')
             sock.sendto(msg, (MULTICAST_GROUP, MULTICAST_PORT))
             time.sleep(5)
         except Exception as e:
-            print(f"Heartbeat error: {e}")
+            print(f"Heartbeat error: {e}", flush=True)
             time.sleep(5)
 
 def serve():

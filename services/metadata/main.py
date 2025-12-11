@@ -47,29 +47,36 @@ def heartbeat_listener():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(('', MULTICAST_PORT))
+    # Unicast support: generic UDP listener
     
-    mreq = struct.pack("4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
     
-    print(f"[Metadata] Listening for heartbeats on {MULTICAST_GROUP}:{MULTICAST_PORT}")
+    print(f"[Metadata] Listening for heartbeats on {MULTICAST_GROUP}:{MULTICAST_PORT}", flush=True)
     
     while True:
         try:
             data, addr = sock.recvfrom(1024)
             msg = data.decode('utf-8')
-            # Format: NODE_ID|PORT|LOAD
+            # Updated format: NODE_ID|IP|PORT|LOAD
             parts = msg.split('|')
-            if len(parts) >= 2:
+            if len(parts) >= 3:
                 node_id = parts[0]
-                port = int(parts[1])
-                # Address is the sender's IP (addr[0])
+                node_ip = parts[1]  # Use IP from message, not socket
+                port = int(parts[2])
+                
+                # Only log if this is a new node or IP changed
+                is_new = node_id not in active_nodes
+                ip_changed = not is_new and active_nodes[node_id]["address"] != node_ip
+                
                 active_nodes[node_id] = {
-                    "address": addr[0],
+                    "address": node_ip,  # Use the IP sent by the DataNode
                     "port": port,
                     "last_seen": time.time()
                 }
+                
+                if is_new or ip_changed:
+                    print(f"[Metadata] Registered node {node_id} at {node_ip}:{port}", flush=True)
         except Exception as e:
-            print(f"Listener error: {e}")
+            print(f"Listener error: {e}", flush=True)
 
 def node_monitor():
     """Removes dead nodes"""
@@ -87,43 +94,7 @@ def node_monitor():
         time.sleep(5)
 
 class MetadataService(pb2_grpc.MetadataServiceServicer):
-    def AssignWrite(self, request, context):
-        """Standard N=3 replication strategy"""
-        available = list(active_nodes.items())
-        if len(available) < 1:
-             # For dev/testing, allow 1, but warn
-             # context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "Not enough data nodes")
-             pass
-        
-        # Select up to 3 random nodes
-        count = min(len(available), 3)
-        selected = random.sample(available, count)
-        
-        file_id = str(uuid.uuid4())
-        
-        response = pb2.WriteAllocation(file_id=file_id)
-        for nid, info in selected:
-            response.target_nodes.append(pb2.NodeInfo(
-                node_id=nid,
-                address=info["address"],
-                port=info["port"]
-            ))
-            
-        return response
 
-    def CommitWrite(self, request, context):
-        """Finalize metadata after successful upload"""
-        if request.success:
-            # In a real system we would know WHICH nodes succeeded. 
-            # Simplified: Assume all assigned nodes succeeded if Gateway says success.
-            # We need to store this partially? No, Gateway handled it.
-            
-            # We need to know the original write request details... 
-            # In this simplified proto, we trust the gateway or should cache the 'pending' write.
-            # For simplicity, we just log it as committed. 
-            pass 
-            
-        return pb2.CommitResponse(success=True, message="Committed")
 
     # CUSTOM EXTENSION: We need a way to actually save the file metadata (name, tags)
     # The proto CommitWrite defined earlier was too simple.
@@ -172,7 +143,7 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
             data = self.pending_uploads.pop(request.file_id)
             files_metadata[request.file_id] = {
                 "filename": data["filename"],
-                "tags": data["tags"],
+                "tags": list(data["tags"]),  # Convert protobuf repeated field to list
                 "owner": data["owner"],
                 "size": request.size,
                 "replicas": data["replicas"],

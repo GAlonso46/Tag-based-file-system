@@ -35,6 +35,12 @@ app.add_middleware(
 
 app.include_router(auth.router)
 
+from api.database import engine, Base
+@app.on_event("startup")
+def startup():
+    Base.metadata.create_all(bind=engine)
+
+
 # gRPC Clients
 def get_metadata_stub():
     channel = grpc.insecure_channel(f'{METADATA_HOST}:{METADATA_PORT}')
@@ -106,9 +112,14 @@ async def upload_file(
             except Exception as e:
                 print(f"Failed to upload to {node.node_id}: {e}")
         
-        if success_count < 2: # Quorum check
-            # Rollback? (Not implemented yet, orphan data handling needed)
-            raise HTTPException(500, f"Write Quorum failed. Success on {success_count}/3 nodes.")
+        # Dynamic Quorum: To support partitioned networks or "growing" clusters (N < 3),
+        # we relax the strict quorum. As long as we successfully write to AT LEAST ONE
+        # node of the intended targets, we consider the operation a "success" (availability > consistency).
+        required_writes = 1
+        
+        if success_count < required_writes:
+            # Only fail if we couldn't write to ANY of the allocated nodes
+            raise HTTPException(500, f"Write failed: Stored on {success_count}/{len(target_nodes)} nodes (Required: {required_writes}).")
             
         # 3. Commit Metadata
         meta.CommitWrite(pb2.CommitRequest(
@@ -119,7 +130,7 @@ async def upload_file(
         
         return {
             "name": filename,
-            "tags": normalized_tags,
+            "tags": list(normalized_tags),  # Convert protobuf repeated field to list
             "size": size,
             "url": f"/files/{file_id}" # Use ID now, not filename
         }

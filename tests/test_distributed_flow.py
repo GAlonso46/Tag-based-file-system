@@ -4,7 +4,7 @@ import os
 import time
 
 # Configuration
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 USERNAME = f"testuser_{int(time.time())}"
 PASSWORD = "password123"
 EMAIL = f"{USERNAME}@example.com"

@@ -4,7 +4,7 @@ services:
   # 1. Gateway (Interface)
   gateway:
     image: tagfs-backend:latest
-    command: ["uvicorn", "services.gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["python", "-u", "-m", "uvicorn", "services.gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
     environment:
@@ -12,43 +12,50 @@ services:
       - METADATA_PORT=50051
     networks:
       - tagfs-overlay
+    volumes:
+      - gateway-store:/app/tags_data
     deploy:
       replicas: 1
-      placement:
-        constraints: [node.role == manager]
+      update_config:
+        parallelism: 1
+        delay: 10s
+      # placement:
+      #   constraints: [node.role == manager]
 
   # 2. Metadata Service (Control)
   metadata:
     image: tagfs-backend:latest
-    command: ["python", "services/metadata/main.py"]
+    command: ["python", "-u", "services/metadata/main.py"]
     networks:
       - tagfs-overlay
     environment:
       - PORT=50051
       - MULTICAST_PORT=5000
+      - MULTICAST_GROUP=metadata
     deploy:
       replicas: 1
-      placement:
-        constraints: [node.role == manager]
+      # placement:
+      #   constraints: [node.role == manager]
     volumes:
       - metadata-store:/app/metadata_storage
 
   # 3. DataNodes (Storage)
   datanode:
     image: tagfs-backend:latest
-    command: ["python", "services/datanode/main.py"]
+    command: ["python", "-u", "services/datanode/main.py"]
     networks:
       - tagfs-overlay
     environment:
       - PORT=50051
       - MULTICAST_PORT=5000
+      - MULTICAST_GROUP=metadata
       # Random ID generation handled in code if NOT set, but let's try to set it via template if possible
       # Docker Swarm doesn't easily template env vars per replica index without hacks.
       # We rely on code generating unique ID based on hostname/time.
     deploy:
       replicas: 3
-      placement:
-        constraints: [node.role == worker]
+      # placement:
+      #   constraints: [node.role == worker]
     volumes:
       - datanode-store:/app/data_node_storage
 
@@ -61,8 +68,8 @@ services:
       - tagfs-overlay
     deploy:
       replicas: 1
-      placement:
-        constraints: [node.role == worker]
+      # placement:
+      #   constraints: [node.role == worker]
 
 networks:
   tagfs-overlay:
@@ -72,3 +79,4 @@ networks:
 volumes:
   metadata-store:
   datanode-store:
+  gateway-store:
