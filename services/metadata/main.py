@@ -14,6 +14,9 @@ from pathlib import Path
 import protos.service_pb2 as pb2
 import protos.service_pb2_grpc as pb2_grpc
 
+# Bully algorithm for leader election
+from bully import BullyLeaderElection
+
 # Configuration
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "50051"))
@@ -23,9 +26,15 @@ DATA_DIR = Path("./metadata_storage")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 FILES_DB = DATA_DIR / "files.json"
 
+# Bully configuration
+NODE_ID = int(os.getenv("NODE_ID", str(hash(socket.gethostname()) % 1000)))
+print(f"[Metadata] Starting with NODE_ID={NODE_ID}", flush=True)
+
 # State
 active_nodes = {} # {node_id: {address, port, last_seen}}
 files_metadata = {} # {file_id: {filename, size, tags, replicas: []}}
+metadata_service_instance = None  # Will be set after service creation
+bully = None  # Will be initialized after service creation
 
 # Persistence
 def load_metadata():
@@ -94,22 +103,6 @@ def node_monitor():
         time.sleep(5)
 
 class MetadataService(pb2_grpc.MetadataServiceServicer):
-
-
-    # CUSTOM EXTENSION: We need a way to actually save the file metadata (name, tags)
-    # The proto CommitWrite defined earlier was too simple.
-    # Let's add a proper metadata save method or overload CommitWrite?
-    # Actually, let's assume the Gateway calls AddFileMetadata (missing from my proto!)
-    # I will modify this to use 'AddTags' or 'CommitWrite' properly. 
-    # Let's use a workaround: The Gateway sends metadata in a separate call or we expand CommitWrite?
-    # I'll stick to the proto I defined: CommitWrite has size/success. 
-    # Wait, the AssignWrite had the metadata! I should have cached it.
-    
-    # IMPROVEMENT: Let's use a specific RPC for registering the file *after* success.
-    # Or better, just trust the Gateway to send a "RegisterFile" command.
-    # I will use `AddTags` to associate tags, but I need `CreateFile`.
-    # Current proto limitation: `CommitWrite` doesn't have filename/tags.
-    # `AssignWrite` had them. I will store them in `pending_uploads`.
     
     pending_uploads = {} # file_id -> {filename, tags, owner, nodes}
 
@@ -139,6 +132,14 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
         return response
 
     def CommitWrite(self, request, context):
+        # BULLY: Only leader can process writes
+        global bully
+        if bully and not bully.is_leader():
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            leader_id = bully.get_leader_id()
+            context.set_details(f"Not leader. Current leader: {leader_id if leader_id else 'unknown'}")
+            return pb2.CommitResponse(success=False, message="Not leader")
+        
         if request.success and request.file_id in self.pending_uploads:
             data = self.pending_uploads.pop(request.file_id)
             files_metadata[request.file_id] = {
@@ -212,19 +213,67 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
             resp.files.append(loc)
             
         return resp
+    
+    # ==================== BULLY ALGORITHM RPCs ====================
+    
+    def Election(self, request, context):
+        """Handle ELECTION message from another node"""
+        global bully
+        if bully:
+            ok = bully.handle_election_request(request.candidate_id)
+            return pb2.ElectionResponse(ok=ok)
+        return pb2.ElectionResponse(ok=False)
+    
+    def Coordinator(self, request, context):
+        """Handle COORDINATOR message (new leader announcement)"""
+        global bully
+        if bully:
+            ok = bully.handle_coordinator_message(request.leader_id)
+            return pb2.CoordinatorResponse(ok=ok)
+        return pb2.CoordinatorResponse(ok=False)
+    
+    def LeaderHeartbeat(self, request, context):
+        """Handle heartbeat from leader"""
+        global bully
+        if bully:
+            ok = bully.handle_leader_heartbeat(request.leader_id)
+            return pb2.HeartbeatResponse(ok=ok)
+        return pb2.HeartbeatResponse(ok=False)
+
 
 def serve():
+    global bully, metadata_service_instance
+    
     load_metadata()
+    
+    # Create service instance
+    metadata_service_instance = MetadataService()
+    
+    # Initialize Bully algorithm
+    bully = BullyLeaderElection(NODE_ID, metadata_service_instance)
+    
+    # TODO: Register other metadata nodes when they become known
+    # For now, nodes will discover each other through heartbeats
+    # In production, this could be configured via environment variables
+    
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    pb2_grpc.add_MetadataServiceServicer_to_server(MetadataService(), server)
+    pb2_grpc.add_MetadataServiceServicer_to_server(metadata_service_instance, server)
     server.add_insecure_port(f'[::]:{PORT}')
     
     threading.Thread(target=heartbeat_listener, daemon=True).start()
     threading.Thread(target=node_monitor, daemon=True).start()
     
-    print(f"[Metadata] Service started on port {PORT}")
+    print(f"[Metadata] Service started on port {PORT} with NODE_ID={NODE_ID}", flush=True)
     server.start()
+    
+    # Start Bully election after server is running
+    # Give time for other nodes to start
+    time.sleep(5)
+    print(f"[Metadata] Starting Bully leader election...", flush=True)
+    bully.start()
+    
     server.wait_for_termination()
 
 if __name__ == '__main__':
     serve()
+
