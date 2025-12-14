@@ -47,7 +47,8 @@ export const Analytics = () => {
         try {
             const token = localStorage.getItem('token');
             const headers = {
-                'Authorization': `Bearer ${token}`
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
             };
 
             const [dateRes, typeRes, tagsRes, storageRes, usersRes] = await Promise.all([
@@ -58,11 +59,13 @@ export const Analytics = () => {
                 fetch(`${API_URL}/analytics/user-stats`, { headers })
             ]);
 
-            setFilesByDate(await dateRes.json());
-            setFilesByType(await typeRes.json());
-            setTagsUsage(await tagsRes.json());
-            setStorageByTag(await storageRes.json());
-            setUserStats(await usersRes.json());
+            // Verificar respuestas antes de parsear
+            if (dateRes.ok) setFilesByDate(await dateRes.json());
+            if (typeRes.ok) setFilesByType(await typeRes.json());
+            if (tagsRes.ok) setTagsUsage(await tagsRes.json());
+            if (storageRes.ok) setStorageByTag(await storageRes.json());
+            if (usersRes.ok) setUserStats(await usersRes.json());
+            
         } catch (error) {
             console.error('Error al cargar analytics:', error);
         } finally {

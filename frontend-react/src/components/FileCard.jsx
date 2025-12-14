@@ -9,7 +9,7 @@ export const FileCard = ({ file, onEdit, onDelete }) => {
     const filename = file.filename || file.name;
 
     const handleDownload = () => {
-        downloadFile(filename);
+        downloadFile(file);
     };
 
     const handleEdit = () => {

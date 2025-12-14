@@ -83,13 +83,38 @@ export const deleteFile = async (filename) => {
 };
 
 // Descargar archivo
-export const downloadFile = (filename) => {
-    const token = localStorage.getItem('token');
-    const url = new URL(`${API_URL}/files/${filename}/download`);
-    if (token) {
-        url.searchParams.append('token', token);
+export const downloadFile = async (file) => {
+    try {
+        // Usar file_id si está disponible, sino usar filename
+        const fileId = file.id || file.file_id || file.name || file.filename;
+        const filename = file.name || file.filename || 'download';
+        
+        const response = await fetch(`${API_URL}/files/${fileId}`, {
+            headers: getAuthHeaders()
+        });
+        
+        if (!response.ok) {
+            throw new Error('Error al descargar archivo');
+        }
+        
+        // Obtener el blob del archivo
+        const blob = await response.blob();
+        
+        // Crear un enlace temporal para descargar
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        
+        // Limpiar
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+    } catch (error) {
+        console.error('Error al descargar archivo:', error);
+        alert('Error al descargar el archivo');
     }
-    window.open(url.toString(), '_blank');
 };
 
 // Obtener estadísticas

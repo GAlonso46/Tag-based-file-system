@@ -91,6 +91,13 @@ service MetadataService {
   rpc Election (ElectionRequest) returns (ElectionResponse);
   rpc Coordinator (CoordinatorRequest) returns (CoordinatorResponse);
   rpc LeaderHeartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+  
+  // Gossip Protocol RPCs for Metadata Propagation
+  rpc GossipPush (GossipUpdate) returns (GossipAck);
+  rpc GossipPull (GossipRequest) returns (GossipUpdate);
+  
+  // Merkle Tree Anti-Entropy
+  rpc CompareMerkleRoot (MerkleRootRequest) returns (MerkleRootResponse);
 }
 
 message WriteRequest {
@@ -135,6 +142,7 @@ message TagResponse {
 
 message ListRequest {
   repeated string tags_filter = 1; // Empty for all
+  string owner_filter = 2; // Filter by owner_id (empty = all files, for admin)
 }
 
 message ListResponse {
@@ -165,5 +173,61 @@ message HeartbeatRequest {
 
 message HeartbeatResponse {
   bool ok = 1;
+}
+
+// ==================== GOSSIP PROTOCOL MESSAGES ====================
+
+message DataNodeEntry {
+  string node_id = 1;
+  string address = 2;
+  int32 port = 3;
+  int64 last_seen = 4;
+}
+
+message FileMetadataEntry {
+  string file_id = 1;
+  string filename = 2;
+  repeated string tags = 3;
+  string owner = 4;
+  int64 size = 5;
+  repeated string replicas = 6;
+  int64 created_at = 7;
+  int64 lamport_time = 8;
+  map<int32, int32> version_vector = 9; // node_id -> version
+}
+
+message GossipUpdate {
+  int32 sender_id = 1;
+  int64 sender_lamport_time = 2;
+  repeated FileMetadataEntry files = 3;
+  repeated DataNodeEntry datanodes = 4;  // Share active DataNode registry
+}
+
+message GossipAck {
+  bool ok = 1;
+  int64 receiver_lamport_time = 2;
+}
+
+message GossipRequest {
+  int32 requester_id = 1;
+}
+
+// ==================== MERKLE TREE MESSAGES ====================
+
+message MerkleLeaf {
+  string key = 1;    // file_id
+  string hash = 2;   // hash of this file's metadata
+}
+
+message MerkleRootRequest {
+  int32 sender_id = 1;
+  string root_hash = 2;
+  repeated MerkleLeaf leaf_hashes = 3;  // For detailed comparison
+}
+
+message MerkleRootResponse {
+  bool match = 1;
+  string root_hash = 2;
+  repeated string divergent_keys = 3; // File IDs that differ
 }
 

@@ -12,7 +12,8 @@ import protos.service_pb2 as pb2
 import protos.service_pb2_grpc as pb2_grpc
 
 # Configuration
-NODE_ID = os.getenv("NODE_ID", f"datanode-{int(time.time())}")
+# Generate unique NODE_ID using hostname + timestamp to ensure uniqueness across replicas
+NODE_ID = os.getenv("NODE_ID", f"datanode-{socket.gethostname()}-{int(time.time() * 1000000) % 1000000}")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "50051"))
 MULTICAST_GROUP = os.getenv("MULTICAST_GROUP", "224.0.0.1")

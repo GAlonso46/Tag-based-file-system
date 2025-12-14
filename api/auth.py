@@ -129,6 +129,46 @@ def login(
     return {"access_token": access_token, "token_type": "bearer"}
 
 
+class LoginJSON(BaseModel):
+    """Schema para login con JSON"""
+    username: str
+    password: str
+
+
+@router.post("/login-json", response_model=Token)
+def login_json(
+    credentials: LoginJSON,
+    db: Session = Depends(get_db)
+):
+    """
+    Login de usuario con JSON (alternativa al form-data)
+    
+    - **username**: Nombre de usuario
+    - **password**: Contraseña
+    
+    Retorna un token JWT de acceso
+    """
+    # Buscar usuario
+    user = db.query(User).filter(User.username == credentials.username).first()
+    
+    # Verificar usuario y contraseña
+    if not user or not verify_password(credentials.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuario o contraseña incorrectos",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Crear token de acceso
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username},
+        expires_delta=access_token_expires
+    )
+    
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
 @router.get("/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_active_user)):
     """
