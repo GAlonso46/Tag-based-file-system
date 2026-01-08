@@ -2,6 +2,8 @@ import os
 import io
 import grpc
 import json
+import asyncio
+import concurrent.futures
 from concurrent import futures
 from typing import List, Optional
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Depends
@@ -24,6 +26,8 @@ from api.database import get_db
 METADATA_HOST = os.getenv("METADATA_HOST", "metadata")
 METADATA_PORT = os.getenv("METADATA_PORT", "50051")
 CHUNK_SIZE = 1024 * 1024
+ENABLE_TLS = os.getenv("ENABLE_TLS", "false").lower() == "true"
+CERT_DIR = os.getenv("CERT_DIR", "./certs")
 
 app = FastAPI(title="TagFS Gateway", version="3.0.0")
 
@@ -47,6 +51,31 @@ def startup():
 _metadata_channel = None
 _metadata_stub = None
 
+def get_grpc_credentials():
+    """Get gRPC credentials (TLS or insecure)"""
+    if not ENABLE_TLS:
+        return None
+    
+    try:
+        with open(f"{CERT_DIR}/ca-cert.pem", "rb") as f:
+            root_cert = f.read()
+        with open(f"{CERT_DIR}/client-cert.pem", "rb") as f:
+            client_cert = f.read()
+        with open(f"{CERT_DIR}/client-key.pem", "rb") as f:
+            client_key = f.read()
+        
+        credentials = grpc.ssl_channel_credentials(
+            root_certificates=root_cert,
+            private_key=client_key,
+            certificate_chain=client_cert
+        )
+        print("[Gateway] TLS enabled for gRPC connections", flush=True)
+        return credentials
+    except Exception as e:
+        print(f"[Gateway] Warning: Could not load TLS certificates: {e}", flush=True)
+        print("[Gateway] Falling back to insecure connections", flush=True)
+        return None
+
 def get_metadata_stub():
     """Get metadata stub with retry logic to find leader"""
     global _metadata_channel, _metadata_stub
@@ -56,26 +85,37 @@ def get_metadata_stub():
         return _metadata_stub
     
     # Create new connection
-    _metadata_channel = grpc.insecure_channel(
-        f'{METADATA_HOST}:{METADATA_PORT}',
-        options=[
-            ('grpc.max_send_message_length', 50 * 1024 * 1024),
-            ('grpc.max_receive_message_length', 50 * 1024 * 1024),
-            ('grpc.keepalive_time_ms', 10000),
-            ('grpc.keepalive_timeout_ms', 5000),
-            ('grpc.http2.min_time_between_pings_ms', 10000),
-            ('grpc.http2.max_pings_without_data', 0),
-        ]
-    )
+    options = [
+        ('grpc.max_send_message_length', 50 * 1024 * 1024),
+        ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+        ('grpc.keepalive_time_ms', 10000),
+        ('grpc.keepalive_timeout_ms', 5000),
+        ('grpc.http2.min_time_between_pings_ms', 10000),
+        ('grpc.http2.max_pings_without_data', 0),
+    ]
+    
+    credentials = get_grpc_credentials()
+    if credentials:
+        _metadata_channel = grpc.secure_channel(
+            f'{METADATA_HOST}:{METADATA_PORT}',
+            credentials,
+            options=options
+        )
+    else:
+        _metadata_channel = grpc.insecure_channel(
+            f'{METADATA_HOST}:{METADATA_PORT}',
+            options=options
+        )
     _metadata_stub = pb2_grpc.MetadataServiceStub(_metadata_channel)
     return _metadata_stub
 
-def call_metadata_with_leader_retry(method_name, request, timeout=10, max_retries=3):
+def call_metadata_with_leader_retry(method_name, request, timeout=10, max_retries=5):
     """
     Call metadata RPC with automatic retry to find leader.
     
     If a node returns FAILED_PRECONDITION (not leader), we retry with a fresh connection.
     Docker Swarm DNS will round-robin to different metadata replicas.
+    Also retries on UNAVAILABLE status (node temporarily down).
     """
     global _metadata_channel, _metadata_stub
     
@@ -86,9 +126,27 @@ def call_metadata_with_leader_retry(method_name, request, timeout=10, max_retrie
             return method(request, timeout=timeout)
             
         except grpc.RpcError as e:
+            should_retry = False
+            error_msg = ""
+            
             if e.code() == grpc.StatusCode.FAILED_PRECONDITION:
-                # Not leader, close connection and retry with different node
-                print(f"[Gateway] Node not leader, retrying... (attempt {attempt + 1}/{max_retries})", flush=True)
+                # Not leader, retry with different node
+                error_msg = "Node not leader"
+                should_retry = True
+            elif e.code() == grpc.StatusCode.UNAVAILABLE:
+                # Node unavailable, retry
+                error_msg = "Node unavailable"
+                should_retry = True
+            elif e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                # Timeout, retry
+                error_msg = "Request timeout"
+                should_retry = True
+            else:
+                # Other RPC error, don't retry
+                raise HTTPException(500, f"Metadata service error: {e.details()}")
+            
+            if should_retry and attempt < max_retries - 1:
+                print(f"[Gateway] {error_msg}, retrying... (attempt {attempt + 1}/{max_retries})", flush=True)
                 
                 # Force new connection on next attempt
                 if _metadata_channel is not None:
@@ -99,36 +157,45 @@ def call_metadata_with_leader_retry(method_name, request, timeout=10, max_retrie
                 _metadata_channel = None
                 _metadata_stub = None
                 
-                if attempt < max_retries - 1:
-                    import time
-                    time.sleep(0.5)  # Brief delay before retry
-                    continue
-                else:
-                    # All retries exhausted
-                    raise HTTPException(503, f"Could not find metadata leader after {max_retries} attempts")
-            else:
-                # Other RPC error, raise as HTTP exception
-                raise HTTPException(500, f"Metadata service error: {e.details()}")
+                import time
+                # Exponential backoff
+                time.sleep(0.5 * (2 ** attempt))
+                continue
+            elif attempt >= max_retries - 1:
+                # All retries exhausted
+                raise HTTPException(503, f"Could not complete metadata operation after {max_retries} attempts: {error_msg}")
+            
         except Exception as e:
             # Non-RPC error
+            if attempt < max_retries - 1:
+                print(f"[Gateway] Internal error, retrying: {str(e)}", flush=True)
+                import time
+                time.sleep(0.5 * (2 ** attempt))
+                continue
             raise HTTPException(500, f"Internal error: {str(e)}")
 
 def get_datanode_stub(host, port):
-    channel = grpc.insecure_channel(
-        f'{host}:{port}',
-        options=[
-            ('grpc.max_send_message_length', 50 * 1024 * 1024),
-            ('grpc.max_receive_message_length', 50 * 1024 * 1024),
-        ]
-    )
+    options = [
+        ('grpc.max_send_message_length', 50 * 1024 * 1024),
+        ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+    ]
+    
+    credentials = get_grpc_credentials()
+    if credentials:
+        channel = grpc.secure_channel(f'{host}:{port}', credentials, options=options)
+    else:
+        channel = grpc.insecure_channel(f'{host}:{port}', options=options)
+    
     return pb2_grpc.DataNodeServiceStub(channel)
 
 # Generators
 def chunk_generator(file_id, content):
     """Yields chunks needed for StoreChunk gRPC call"""
     offset = 0
+    chunk_count = 0
     while offset < len(content):
         chunk = content[offset:offset+CHUNK_SIZE]
+        chunk_count += 1
         yield pb2.FileChunk(
             file_id=file_id,
             content=chunk,
@@ -136,6 +203,7 @@ def chunk_generator(file_id, content):
             is_last=(offset + len(chunk) >= len(content))
         )
         offset += len(chunk)
+    print(f"[Gateway] Generated {chunk_count} chunks for file {file_id} ({len(content)} bytes total)", flush=True)
 
 # Endpoints
 
@@ -177,21 +245,42 @@ async def upload_file(
         print(f"[Gateway] Uploading file {file_id} to {len(target_nodes)} DataNodes", flush=True)
             
         # 2. Parallel Upload to DataNodes (Quorum W=2)
+        # Use asyncio to upload to multiple nodes concurrently
         success_count = 0
+        upload_results = []
         
-        # Simplified sequential upload for prototype (ideally async/parallel)
-        for node in target_nodes:
+        # Create thread pool executor for blocking gRPC calls
+        loop = asyncio.get_event_loop()
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(target_nodes))
+        
+        def upload_to_node(node):
+            """Upload file to a single DataNode"""
             try:
                 print(f"[Gateway] Uploading to node {node.node_id} at {node.address}:{node.port}", flush=True)
                 ds = get_datanode_stub(node.address, node.port)
-                resp = ds.StoreChunk(chunk_generator(file_id, content), timeout=30)
+                # IMPORTANT: Create a NEW generator for each thread, don't share!
+                # Sharing a generator across threads causes chunks to be split between nodes
+                resp = ds.StoreChunk(chunk_generator(file_id, content), timeout=60)  # Increased timeout
                 if resp.success:
-                    success_count += 1
-                    print(f"[Gateway] Successfully stored on node {node.node_id}", flush=True)
+                    print(f"[Gateway] Successfully stored on node {node.node_id} ({resp.bytes_written} bytes)", flush=True)
+                    return (node.node_id, True, None, resp.bytes_written)
                 else:
                     print(f"[Gateway] Failed to store on node {node.node_id}: {resp.message}", flush=True)
+                    return (node.node_id, False, resp.message, 0)
             except Exception as e:
                 print(f"[Gateway] Failed to upload to {node.node_id}: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                return (node.node_id, False, str(e), 0)
+        
+        # Run uploads in parallel
+        tasks = [loop.run_in_executor(executor, upload_to_node, node) for node in target_nodes]
+        upload_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Count successful uploads
+        for result in upload_results:
+            if isinstance(result, tuple) and result[1]:  # result is (node_id, success, message)
+                success_count += 1
         
         print(f"[Gateway] Upload complete: {success_count}/{len(target_nodes)} successful", flush=True)
         
@@ -204,12 +293,19 @@ async def upload_file(
             raise HTTPException(500, f"Write quorum not met: Stored on {success_count}/{len(target_nodes)} nodes (Required: {required_writes}).")
             
         # 3. Commit Metadata (with leader retry)
+        # Collect IDs of successful nodes
+        successful_node_ids = []
+        for result in upload_results:
+            if isinstance(result, tuple) and result[1]:
+                successful_node_ids.append(result[0])
+        
         call_metadata_with_leader_retry(
             'CommitWrite',
             pb2.CommitRequest(
                 file_id=file_id,
                 size=size,
-                success=True
+                success=True,
+                successful_nodes=successful_node_ids
             ),
             timeout=10
         )

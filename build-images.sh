@@ -10,10 +10,10 @@ echo -e "\n📦 Building Backend..."
 docker build -f Dockerfile.backend -t tagfs-backend:latest .
 
 # Frontend
-echo -e "\n🎨 Building Frontend..."
-cd frontend-react
-docker build -t tagfs-frontend:latest .
-cd ..
+# echo -e "\n🎨 Building Frontend..."
+# cd frontend-react
+# docker build -t tagfs-frontend:latest .
+# cd ..
 
 # Verify
 echo -e "\n✅ Images built:"

@@ -38,6 +38,9 @@ service DataNodeService {
 
   // Delete a file
   rpc DeleteFile (FileRequest) returns (DeleteResponse);
+  
+  // Replicate file from source to target DataNode (for re-replication)
+  rpc ReplicateFrom (ReplicationRequest) returns (ReplicationResponse);
 }
 
 message PingRequest {}
@@ -66,6 +69,18 @@ message FileRequest {
 message DeleteResponse {
   bool success = 1;
   string message = 2;
+}
+
+message ReplicationRequest {
+  string file_id = 1;
+  string source_node_address = 2;
+  int32 source_node_port = 3;
+}
+
+message ReplicationResponse {
+  bool success = 1;
+  string message = 2;
+  int64 bytes_replicated = 3;
 }
 
 // ==================== METADATA SERVICE ====================
@@ -117,6 +132,7 @@ message CommitRequest {
   string file_id = 1;
   int64 size = 2;
   bool success = 3;
+  repeated string successful_nodes = 4; // List of node_ids that successfully stored the file
 }
 
 message CommitResponse {

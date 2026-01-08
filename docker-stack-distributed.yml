@@ -34,16 +34,19 @@ services:
     environment:
       - PORT=50051
       - MULTICAST_PORT=5000
-      - MULTICAST_GROUP=metadata
+      - MULTICAST_GROUP=224.0.0.1
+      - EXPECTED_METADATA_REPLICAS=3  # Número esperado de réplicas para esperar antes de iniciar elección
       # NODE_ID will be derived from hostname in code
       # Swarm creates hostnames like: metadata.1.xyz, metadata.2.xyz, metadata.3.xyz
     deploy:
-      replicas: 3  # Changed from 1 to 3 for Bully
+      replicas: 3  # 3 réplicas para tolerancia a fallos según informe_sd.md
       update_config:
         parallelism: 1
         delay: 10s
-      # placement:
-      #   constraints: [node.role == manager]
+      placement:
+        preferences:
+          - spread: node.id
+        # constraints: [node.role == manager]
     volumes:
       - metadata-store:/app/metadata_storage
 
@@ -62,22 +65,25 @@ services:
       # We rely on code generating unique ID based on hostname/time.
     deploy:
       replicas: 3
-      # placement:
+      # Spread replicas across different nodes for Fault Tolerance
+      placement:
+        preferences:
+          - spread: node.id
       #   constraints: [node.role == worker]
     volumes:
       - datanode-store:/app/data_node_storage
 
-  # 4. Frontend
-  frontend:
-    image: tagfs-frontend:latest
-    ports:
-      - "80:80"
-    networks:
-      - tagfs-overlay
-    deploy:
-      replicas: 1
-      # placement:
-      #   constraints: [node.role == worker]
+  # 4. Frontend (Disabled for robustness testing causing build issues)
+  # frontend:
+  #   image: tagfs-frontend:latest
+  #   ports:
+  #     - "80:80"
+  #   networks:
+  #     - tagfs-overlay
+  #   deploy:
+  #     replicas: 1
+  #     # placement:
+  #     #   constraints: [node.role == worker]
 
 networks:
   tagfs-overlay:

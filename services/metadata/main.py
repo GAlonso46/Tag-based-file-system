@@ -7,6 +7,7 @@ import threading
 import json
 import random
 import uuid
+import hashlib
 from concurrent import futures
 from pathlib import Path
 
@@ -31,10 +32,35 @@ MULTICAST_PORT = int(os.getenv("MULTICAST_PORT", "5000"))
 DATA_DIR = Path("./metadata_storage")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 FILES_DB = DATA_DIR / "files.json"
+ENABLE_TLS = os.getenv("ENABLE_TLS", "false").lower() == "true"
+CERT_DIR = os.getenv("CERT_DIR", "./certs")
 
 # Bully configuration
-NODE_ID = int(os.getenv("NODE_ID", str(hash(socket.gethostname()) % 1000)))
-print(f"[Metadata] Starting with NODE_ID={NODE_ID}", flush=True)
+# Persistence for NODE_ID to prevent identity loss on restart
+NODE_ID_FILE = DATA_DIR / "node_id"
+def load_or_create_node_id():
+    if NODE_ID_FILE.exists():
+        try:
+            with open(NODE_ID_FILE, "r") as f:
+                return int(f.read().strip())
+        except:
+            pass
+    # Generate stable ID if not exists
+    # Use hash of hostname but ensure it's positive
+    new_id = int(hash(socket.gethostname()) % 1000)
+    if new_id < 0: new_id *= -1
+    
+    # Save it
+    try:
+        with open(NODE_ID_FILE, "w") as f:
+            f.write(str(new_id))
+    except:
+        pass
+    return new_id
+
+NODE_ID = int(os.getenv("NODE_ID", load_or_create_node_id()))
+EXPECTED_METADATA_REPLICAS = int(os.getenv("EXPECTED_METADATA_REPLICAS", "3"))
+print(f"[Metadata] Starting with persistent NODE_ID={NODE_ID}, expecting {EXPECTED_METADATA_REPLICAS} total replicas", flush=True)
 
 # State
 active_nodes = {} # {node_id: {address, port, last_seen}}
@@ -56,10 +82,64 @@ def load_metadata():
             files_metadata = {}
 
 def save_metadata():
-    with open(FILES_DB, "w") as f:
-        json.dump(files_metadata, f)
+    """Atomic write to prevent corruption on crash"""
+    temp_file = FILES_DB.with_suffix(".tmp")
+    try:
+        with open(temp_file, "w") as f:
+            json.dump(files_metadata, f)
+        # Atomic replacement (POSIX)
+        temp_file.replace(FILES_DB)
+    except Exception as e:
+        print(f"[Metadata] Failed to save metadata: {e}", flush=True)
+        if temp_file.exists():
+            try:
+                temp_file.unlink()
+            except:
+                pass
 
 # Background Tasks
+def discover_metadata_peers():
+    """
+    Discover other metadata nodes using Docker Swarm DNS (tasks.metadata).
+    Returns list of (node_id, address) tuples.
+    """
+    peers = []
+    try:
+        # Docker Swarm resolves tasks.metadata to all IPs of metadata service replicas
+        hostname = "tasks.metadata"
+        port = PORT
+        
+        # Resolve all IPs
+        addrs = socket.getaddrinfo(hostname, port, socket.AF_INET, socket.SOCK_STREAM)
+        ips = list(set([addr[4][0] for addr in addrs]))
+        
+        print(f"[Metadata] DNS resolved {len(ips)} metadata instances: {ips}", flush=True)
+        
+        # Ping each one to get their NODE_ID
+        for ip in ips:
+            try:
+                channel = grpc.insecure_channel(f"{ip}:{port}", options=[
+                    ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+                ])
+                stub = pb2_grpc.MetadataServiceStub(channel)
+                
+                response = stub.Ping(pb2.PingRequest(), timeout=5)
+                peer_node_id = int(response.node_id)
+                
+                # Don't add ourselves
+                if peer_node_id != NODE_ID:
+                    peers.append((peer_node_id, f"{ip}:{port}"))
+                    print(f"[Metadata] Discovered peer NODE_ID={peer_node_id} at {ip}:{port}", flush=True)
+                
+                channel.close()
+            except Exception as e:
+                print(f"[Metadata] Failed to ping {ip}:{port}: {e}", flush=True)
+        
+    except Exception as e:
+        print(f"[Metadata] Error discovering peers: {e}", flush=True)
+    
+    return peers
+
 def heartbeat_listener():
     """Listens for UDP heartbeats and updates registry"""
     global bully
@@ -70,6 +150,9 @@ def heartbeat_listener():
     
     
     print(f"[Metadata] Listening for heartbeats on {MULTICAST_GROUP}:{MULTICAST_PORT}", flush=True)
+    
+    # Also discover peers via DNS (Docker Swarm service discovery)
+    threading.Thread(target=discover_metadata_peers_via_dns, daemon=True).start()
     
     while True:
         try:
@@ -114,6 +197,60 @@ def heartbeat_listener():
         except Exception as e:
             print(f"Listener error: {e}", flush=True)
 
+def discover_metadata_peers_via_dns():
+    """Discover other metadata nodes using Docker Swarm DNS and gRPC registration"""
+    global bully
+    import socket as sock_module
+    
+    # Wait for server to be ready
+    time.sleep(5)
+    
+    while True:
+        try:
+            # Docker Swarm DNS: tasks.<service_name> resolves to all task IPs
+            service_name = "tasks.metadata"
+            
+            try:
+                # Get all IPs for the service
+                peer_ips = sock_module.gethostbyname_ex(service_name)[2]
+                
+                my_ip = sock_module.gethostbyname(sock_module.gethostname())
+                
+                for ip in peer_ips:
+                    if ip != my_ip:  # Don't register ourselves
+                        try:
+                            # Connect to peer and get their actual NODE_ID via gRPC
+                            channel = grpc.insecure_channel(f"{ip}:{PORT}", options=[
+                                ('grpc.max_receive_message_length', 10 * 1024 * 1024),
+                            ])
+                            stub = pb2_grpc.MetadataServiceStub(channel)
+                            
+                            # Ping to check if reachable and get NODE_ID
+                            response = stub.Ping(pb2.PingRequest(), timeout=2)
+                            
+                            if response and response.node_id:
+                                peer_node_id = int(response.node_id)
+                                
+                                if bully and peer_node_id != NODE_ID:
+                                    with bully.nodes_lock:
+                                        if peer_node_id not in bully.all_nodes:
+                                            bully.register_node(peer_node_id, f"{ip}:{PORT}")
+                                            print(f"[Metadata] Discovered peer via DNS+gRPC: node_id={peer_node_id} at {ip}:{PORT}", flush=True)
+                            
+                            channel.close()
+                        except Exception as e:
+                            # Peer not ready yet
+                            pass
+            
+            except sock_module.gaierror:
+                # DNS not yet available
+                pass
+        
+        except Exception as e:
+            print(f"[Metadata] DNS discovery error: {e}", flush=True)
+        
+        time.sleep(8)  # Check every 8 seconds
+
 def heartbeat_sender():
     """Sends Metadata node heartbeats to multicast group"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -135,7 +272,7 @@ def heartbeat_sender():
         time.sleep(3)  # Send every 3 seconds
 
 def node_monitor():
-    """Checks for failed nodes and removes them"""
+    """Checks for failed nodes and removes them, triggers re-replication"""
     while True:
         time.sleep(5)
         now = time.time()
@@ -151,10 +288,131 @@ def node_monitor():
             with active_nodes_lock:
                 if node_id in active_nodes:
                     del active_nodes[node_id]
+            
+            # Trigger re-replication for files that lost a replica
+            trigger_re_replication(node_id)
+
+def trigger_re_replication(dead_node_id):
+    """
+    Trigger re-replication for all files that had a replica on the dead node.
+    Implements the Pull pattern: target node pulls data from source node.
+    """
+    print(f"[Re-replication] Scanning files affected by dead node {dead_node_id}", flush=True)
+    
+    affected_files = []
+    
+    # Find all files that had a replica on the dead node
+    for file_id, metadata in files_metadata.items():
+        if dead_node_id in metadata.get("replicas", []):
+            affected_files.append((file_id, metadata))
+    
+    if not affected_files:
+        print(f"[Re-replication] No files affected by node {dead_node_id}", flush=True)
+        return
+    
+    print(f"[Re-replication] Found {len(affected_files)} files to re-replicate", flush=True)
+    
+    for file_id, metadata in affected_files:
+        try:
+            current_replicas = metadata["replicas"]
+            
+            # Remove dead node from replicas list
+            current_replicas = [nid for nid in current_replicas if nid != dead_node_id]
+            
+            # Check if we need more replicas (target is N=3)
+            target_replicas = 3
+            if len(current_replicas) >= target_replicas:
+                # Already have enough replicas
+                files_metadata[file_id]["replicas"] = current_replicas
+                save_metadata()
+                continue
+            
+            # Find a source node (any healthy replica)
+            with active_nodes_lock:
+                source_candidates = [nid for nid in current_replicas if nid in active_nodes]
+            
+            if not source_candidates:
+                print(f"[Re-replication] WARNING: No healthy replicas for file {file_id} ({metadata['filename']})", flush=True)
+                continue
+            
+            source_node_id = random.choice(source_candidates)
+            source_node_info = None
+            with active_nodes_lock:
+                source_node_info = active_nodes[source_node_id]
+            
+            # Find a target node (healthy node without this file)
+            with active_nodes_lock:
+                target_candidates = [
+                    (nid, info) for nid, info in active_nodes.items() 
+                    if nid not in current_replicas
+                ]
+            
+            if not target_candidates:
+                print(f"[Re-replication] No available DataNodes for re-replication of {file_id}", flush=True)
+                continue
+            
+            target_node_id, target_node_info = random.choice(target_candidates)
+            
+            # Instruct target node to pull data from source node
+            print(f"[Re-replication] Replicating {metadata['filename']} from {source_node_id} to {target_node_id}", flush=True)
+            
+            try:
+                # Connect to target DataNode
+                target_channel = grpc.insecure_channel(
+                    f"{target_node_info['address']}:{target_node_info['port']}",
+                    options=[
+                        ('grpc.max_send_message_length', 50 * 1024 * 1024),
+                        ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+                    ]
+                )
+                target_stub = pb2_grpc.DataNodeServiceStub(target_channel)
+                
+                # Create replication request (using existing messages)
+                # We'll use StoreChunk by having target pull from source
+                # First, get data from source
+                source_channel = grpc.insecure_channel(
+                    f"{source_node_info['address']}:{source_node_info['port']}",
+                    options=[
+                        ('grpc.max_send_message_length', 50 * 1024 * 1024),
+                        ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+                    ]
+                )
+                source_stub = pb2_grpc.DataNodeServiceStub(source_channel)
+                
+                # Stream data from source to target
+                chunks = source_stub.RetrieveChunk(pb2.FileRequest(file_id=file_id), timeout=60)
+                response = target_stub.StoreChunk(chunks, timeout=60)
+                
+                if response.success:
+                    # Update metadata: add target to replicas list
+                    current_replicas.append(target_node_id)
+                    files_metadata[file_id]["replicas"] = current_replicas
+                    save_metadata()
+                    print(f"[Re-replication] ✓ Successfully replicated {metadata['filename']} to {target_node_id}", flush=True)
+                else:
+                    print(f"[Re-replication] ✗ Failed to replicate {file_id}: {response.message}", flush=True)
+                
+                source_channel.close()
+                target_channel.close()
+                
+            except Exception as e:
+                print(f"[Re-replication] Error replicating {file_id}: {e}", flush=True)
+        
+        except Exception as e:
+            print(f"[Re-replication] Error processing file {file_id}: {e}", flush=True)
+    
+    print(f"[Re-replication] Re-replication round complete for dead node {dead_node_id}", flush=True)
 
 class MetadataService(pb2_grpc.MetadataServiceServicer):
     
     pending_uploads = {} # file_id -> {filename, tags, owner, nodes}
+
+    def Ping(self, request, context):
+        """Health check and NODE_ID exchange for peer discovery"""
+        return pb2.PingResponse(
+            status="ok",
+            node_id=str(NODE_ID)
+        )
 
     def AssignWrite(self, request, context):
         # ... logic as above ...
@@ -203,19 +461,26 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
             # Initialize version vector for this file
             version_vector = {NODE_ID: 1}  # This node's first version of this file
             
+            # Use actual successful nodes if provided involved in the transaction
+            # This fixes the bug where failed nodes were recorded as replicas
+            final_replicas = list(request.successful_nodes)
+            if not final_replicas:
+                # Fallback to intended replicas (e.g. old gateway)
+                final_replicas = data["replicas"]
+            
             files_metadata[request.file_id] = {
                 "filename": data["filename"],
                 "tags": list(data["tags"]),
                 "owner": data["owner"],
                 "mime_type": data.get("mime_type", ""),
                 "size": request.size,
-                "replicas": data["replicas"],
+                "replicas": final_replicas,
                 "created_at": int(time.time()),
                 "lamport_time": lamport_time,
                 "version_vector": version_vector
             }
             save_metadata()
-            print(f"[Metadata] Committed file {data['filename']} ({request.file_id}) at Lamport time {lamport_time}")
+            print(f"[Metadata] Committed file {data['filename']} ({request.file_id}) with replicas {final_replicas}")
             return pb2.CommitResponse(success=True)
         return pb2.CommitResponse(success=False, message="Invalid ID or pending data not found")
 
@@ -524,7 +789,30 @@ def serve():
     
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     pb2_grpc.add_MetadataServiceServicer_to_server(metadata_service_instance, server)
-    server.add_insecure_port(f'[::]:{PORT}')
+    
+    # Configure TLS if enabled
+    if ENABLE_TLS:
+        try:
+            with open(f"{CERT_DIR}/server-key.pem", "rb") as f:
+                server_key = f.read()
+            with open(f"{CERT_DIR}/server-cert.pem", "rb") as f:
+                server_cert = f.read()
+            with open(f"{CERT_DIR}/ca-cert.pem", "rb") as f:
+                ca_cert = f.read()
+            
+            server_credentials = grpc.ssl_server_credentials(
+                [(server_key, server_cert)],
+                root_certificates=ca_cert,
+                require_client_auth=True
+            )
+            server.add_secure_port(f'[::]:{PORT}', server_credentials)
+            print(f"[Metadata] TLS enabled on port {PORT}", flush=True)
+        except Exception as e:
+            print(f"[Metadata] Warning: Could not load TLS certificates: {e}", flush=True)
+            print(f"[Metadata] Falling back to insecure mode", flush=True)
+            server.add_insecure_port(f'[::]:{PORT}')
+    else:
+        server.add_insecure_port(f'[::]:{PORT}')
     
     threading.Thread(target=heartbeat_listener, daemon=True).start()
     threading.Thread(target=heartbeat_sender, daemon=True).start()
@@ -534,10 +822,32 @@ def serve():
     print(f"[Metadata] Service started on port {PORT} with NODE_ID={NODE_ID}", flush=True)
     server.start()
     
-    # Start Bully election after server is running
-    # Give time for other nodes to start
-    time.sleep(5)
-    print(f"[Metadata] Starting Bully leader election...", flush=True)
+    # CRITICAL: Discover metadata peers using DNS before starting election
+    print(f"[Metadata] Discovering metadata peers via DNS...", flush=True)
+    time.sleep(5)  # Give time for all replicas to start their gRPC servers
+    
+    peers = discover_metadata_peers()
+    
+    # Register discovered peers with Bully
+    for peer_id, peer_addr in peers:
+        bully.register_node(peer_id, peer_addr)
+    
+    print(f"[Metadata] Registered {len(peers)} peers with Bully", flush=True)
+    
+    # Wait a bit more if we haven't discovered all expected peers
+    if len(peers) < EXPECTED_METADATA_REPLICAS - 1:
+        print(f"[Metadata] Only found {len(peers)} peers, waiting 10s more...", flush=True)
+        time.sleep(10)
+        
+        # Try discovery again
+        new_peers = discover_metadata_peers()
+        for peer_id, peer_addr in new_peers:
+            bully.register_node(peer_id, peer_addr)
+        
+        total_peers = len(bully.all_nodes)
+        print(f"[Metadata] After retry: {total_peers} total peers registered", flush=True)
+    
+    print(f"[Metadata] Starting Bully leader election with peers: {list(bully.all_nodes.keys())}", flush=True)
     bully.start()
     
     # Start Gossip protocol after peers discovered
