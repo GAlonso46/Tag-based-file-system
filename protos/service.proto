@@ -100,7 +100,9 @@ service MetadataService {
   // Metadata operations
   rpc AddTags (TagRequest) returns (TagResponse);
   rpc RemoveTags (TagRequest) returns (TagResponse);
+  rpc UpdateTags (UpdateTagsRequest) returns (TagResponse);
   rpc ListFiles (ListRequest) returns (ListResponse);
+  rpc DeleteFile (FileRequest) returns (DeleteResponse);
   
   // Bully Algorithm RPCs for Leader Election
   rpc Election (ElectionRequest) returns (ElectionResponse);
@@ -152,6 +154,11 @@ message FileLocation {
 message TagRequest {
   string file_id = 1;
   repeated string tags = 2;
+}
+
+message UpdateTagsRequest {
+  string file_id = 1;
+  repeated string tags = 2;  // New complete list of tags (replaces existing)
 }
 
 message TagResponse {

@@ -551,6 +551,10 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
         owner_filter = request.owner_filter if hasattr(request, 'owner_filter') else ""
         
         for fid, data in files_metadata.items():
+            # Skip deleted files
+            if data.get("deleted", False):
+                continue
+            
             # Filter by owner if specified (non-admin users)
             if owner_filter and data.get("owner_id") != owner_filter:
                 continue
@@ -571,6 +575,55 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
             resp.files.append(loc)
             
         return resp
+    
+    def UpdateTags(self, request, context):
+        """Update tags for a file (replaces existing tags)"""
+        file_id = request.file_id
+        new_tags = list(request.tags)
+        
+        if file_id not in files_metadata:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(f"File {file_id} not found")
+            return pb2.TagResponse(success=False)
+        
+        # Update tags in memory
+        files_metadata[file_id]["tags"] = new_tags
+        
+        # Persist to disk
+        metadata_store.update_file(file_id, {"tags": new_tags})
+        
+        # Propagate via gossip
+        if gossip_protocol:
+            gossip_protocol.trigger_push()
+        
+        logger.info(f"Updated tags for file {file_id}: {new_tags}")
+        return pb2.TagResponse(success=True, current_tags=new_tags)
+    
+    def DeleteFile(self, request, context):
+        """Delete a file (tombstone approach)"""
+        file_id = request.file_id
+        
+        if file_id not in files_metadata:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(f"File {file_id} not found")
+            return pb2.DeleteResponse(success=False)
+        
+        # Mark as deleted (tombstone)
+        files_metadata[file_id]["deleted"] = True
+        files_metadata[file_id]["deleted_at"] = int(time.time())
+        
+        # Persist to disk
+        metadata_store.update_file(file_id, {
+            "deleted": True,
+            "deleted_at": int(time.time())
+        })
+        
+        # Propagate via gossip
+        if gossip_protocol:
+            gossip_protocol.trigger_push()
+        
+        logger.info(f"Marked file {file_id} as deleted")
+        return pb2.DeleteResponse(success=True)
     
     # ==================== BULLY ALGORITHM RPCs ====================
     

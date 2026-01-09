@@ -427,6 +427,81 @@ async def download_file(file_id: str, current_user: User = Depends(get_current_a
             raise HTTPException(404, "File not found")
         raise HTTPException(500, f"RPC Error: {e.details()}")
 
+@app.delete("/files/{file_id}")
+async def delete_file(file_id: str, current_user: User = Depends(get_current_active_user)):
+    """Delete a file (soft delete with tombstone)"""
+    try:
+        meta = get_metadata_stub()
+        
+        # Verify file exists and user has permission
+        loc = meta.LocateFile(pb2.FileRequest(file_id=file_id), timeout=10)
+        
+        # Check ownership (unless admin)
+        if current_user.is_admin != 1 and loc.metadata.owner_id != str(current_user.id):
+            raise HTTPException(403, "Not authorized to delete this file")
+        
+        # Mark as deleted in metadata (tombstone)
+        result = meta.DeleteFile(pb2.FileRequest(file_id=file_id), timeout=10)
+        
+        if result.success:
+            return {"message": "File deleted successfully", "file_id": file_id}
+        else:
+            raise HTTPException(500, "Failed to delete file")
+            
+    except grpc.RpcError as e:
+        if e.code() == grpc.StatusCode.NOT_FOUND:
+            raise HTTPException(404, "File not found")
+        elif e.code() == grpc.StatusCode.UNIMPLEMENTED:
+            raise HTTPException(501, "Delete operation not implemented in metadata service")
+        raise HTTPException(500, f"RPC Error: {e.details()}")
+
+@app.patch("/files/{file_id}/tags")
+async def update_tags(
+    file_id: str,
+    tags_data: dict,
+    current_user: User = Depends(get_current_active_user)
+):
+    """Update tags for a file"""
+    try:
+        if "tags" not in tags_data:
+            raise HTTPException(400, "Missing 'tags' field in request body")
+        
+        new_tags = tags_data["tags"]
+        if not isinstance(new_tags, list):
+            raise HTTPException(400, "'tags' must be an array")
+        
+        meta = get_metadata_stub()
+        
+        # Verify file exists and user has permission
+        loc = meta.LocateFile(pb2.FileRequest(file_id=file_id), timeout=10)
+        
+        # Check ownership (unless admin)
+        if current_user.is_admin != 1 and loc.metadata.owner_id != str(current_user.id):
+            raise HTTPException(403, "Not authorized to modify this file")
+        
+        # Update tags
+        normalized_tags = normalize_tags(",".join(new_tags)) if new_tags else []
+        result = meta.UpdateTags(pb2.UpdateTagsRequest(
+            file_id=file_id,
+            tags=normalized_tags
+        ), timeout=10)
+        
+        if result.success:
+            return {
+                "message": "Tags updated successfully",
+                "file_id": file_id,
+                "tags": normalized_tags
+            }
+        else:
+            raise HTTPException(500, "Failed to update tags")
+            
+    except grpc.RpcError as e:
+        if e.code() == grpc.StatusCode.NOT_FOUND:
+            raise HTTPException(404, "File not found")
+        elif e.code() == grpc.StatusCode.UNIMPLEMENTED:
+            raise HTTPException(501, "UpdateTags operation not implemented in metadata service")
+        raise HTTPException(500, f"RPC Error: {e.details()}")
+
 @app.get("/files")
 async def list_files(
     tags: Optional[str] = None, 
