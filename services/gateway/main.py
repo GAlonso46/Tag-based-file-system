@@ -432,8 +432,8 @@ async def list_files(
     tags: Optional[str] = None, 
     current_user: User = Depends(get_current_active_user)
 ):
-    # Query ALL metadata replicas and combine results
-    stubs = get_all_metadata_stubs()
+    # Query ALL metadata replicas using fresh connections each time
+    EXPECTED_REPLICAS = int(os.getenv("EXPECTED_METADATA_REPLICAS", "3"))
     
     req = pb2.ListRequest()
     if tags:
@@ -442,13 +442,28 @@ async def list_files(
     # Admin filter: if not admin, filter by owner_id
     if current_user.is_admin != 1:
         req.owner_filter = str(current_user.id)
-    # If admin, no owner_filter = see all files
     
     # Collect files from all metadata nodes
     all_files = {}
-    for stub in stubs:
+    options = [
+        ('grpc.max_send_message_length', 100 * 1024 * 1024),
+        ('grpc.max_receive_message_length', 100 * 1024 * 1024),
+    ]
+    
+    credentials = get_grpc_credentials()
+    
+    # Make multiple requests - DNS round-robin will hit different replicas
+    for i in range(EXPECTED_REPLICAS):
         try:
+            # Create fresh channel for each request to force DNS lookup
+            if credentials:
+                channel = grpc.insecure_channel(f'{METADATA_HOST}:{METADATA_PORT}', options=options)
+            else:
+                channel = grpc.insecure_channel(f'{METADATA_HOST}:{METADATA_PORT}', options=options)
+            
+            stub = pb2_grpc.MetadataServiceStub(channel)
             resp = stub.ListFiles(req, timeout=5)
+            
             for f in resp.files:
                 # Use file_id as key to deduplicate
                 if f.file_id not in all_files:
@@ -461,10 +476,15 @@ async def list_files(
                         "url": f"/files/{f.file_id}",
                         "created_at": f.metadata.created_at if hasattr(f.metadata, 'created_at') else ""
                     }
+            
+            # Close channel after each query to force new DNS lookup
+            channel.close()
+            
         except Exception as e:
-            print(f"[Gateway] Failed to query metadata node: {e}", flush=True)
+            print(f"[Gateway] Failed to query metadata replica {i+1}: {e}", flush=True)
             continue
     
+    print(f"[Gateway] Collected {len(all_files)} unique files from {EXPECTED_REPLICAS} metadata queries", flush=True)
     return list(all_files.values())
 
 @app.get("/tags")
