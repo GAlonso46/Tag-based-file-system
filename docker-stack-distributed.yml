@@ -73,17 +73,17 @@ services:
     volumes:
       - datanode-store:/app/data_node_storage
 
-  # 4. Frontend (Disabled for robustness testing causing build issues)
-  # frontend:
-  #   image: tagfs-frontend:latest
-  #   ports:
-  #     - "80:80"
-  #   networks:
-  #     - tagfs-overlay
-  #   deploy:
-  #     replicas: 1
-  #     # placement:
-  #     #   constraints: [node.role == worker]
+  # 4. Frontend React
+  frontend:
+    image: tagfs-frontend:latest
+    ports:
+      - "80:80"
+    networks:
+      - tagfs-overlay
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
 
 networks:
   tagfs-overlay:
