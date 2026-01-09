@@ -105,8 +105,8 @@ class GossipProtocol:
         try:
             # Create gRPC channel
             channel = grpc.insecure_channel(peer_address, options=[
-                ('grpc.max_send_message_length', 50 * 1024 * 1024),
-                ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+                ('grpc.max_send_message_length', 100 * 1024 * 1024),
+                ('grpc.max_receive_message_length', 100 * 1024 * 1024),
             ])
             stub = pb2_grpc.MetadataServiceStub(channel)
             

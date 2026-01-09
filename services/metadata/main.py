@@ -31,13 +31,15 @@ MULTICAST_GROUP = os.getenv("MULTICAST_GROUP", "224.0.0.1")
 MULTICAST_PORT = int(os.getenv("MULTICAST_PORT", "5000"))
 DATA_DIR = Path("./metadata_storage")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-FILES_DB = DATA_DIR / "files.json"
+# Use hostname to avoid collisions in shared volume
+hostname = socket.gethostname()
+FILES_DB = DATA_DIR / f"files_{hostname}.json"
 ENABLE_TLS = os.getenv("ENABLE_TLS", "false").lower() == "true"
 CERT_DIR = os.getenv("CERT_DIR", "./certs")
 
 # Bully configuration
 # Persistence for NODE_ID to prevent identity loss on restart
-NODE_ID_FILE = DATA_DIR / "node_id"
+NODE_ID_FILE = DATA_DIR / f"node_id_{hostname}"
 def load_or_create_node_id():
     if NODE_ID_FILE.exists():
         try:
@@ -119,7 +121,7 @@ def discover_metadata_peers():
         for ip in ips:
             try:
                 channel = grpc.insecure_channel(f"{ip}:{port}", options=[
-                    ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+                    ('grpc.max_receive_message_length', 100 * 1024 * 1024),
                 ])
                 stub = pb2_grpc.MetadataServiceStub(channel)
                 
@@ -202,10 +204,13 @@ def discover_metadata_peers_via_dns():
     global bully
     import socket as sock_module
     
-    # Wait for server to be ready
-    time.sleep(5)
+    print("[Metadata] Starting peer discovery...", flush=True)
+    start_time = time.time()
+    discovered_peers = []
+    unique_peers_found = set()
     
-    while True:
+    # Try to discover peers for up to 15 seconds
+    while time.time() - start_time < 15:
         try:
             # Docker Swarm DNS: tasks.<service_name> resolves to all task IPs
             service_name = "tasks.metadata"
@@ -213,7 +218,6 @@ def discover_metadata_peers_via_dns():
             try:
                 # Get all IPs for the service
                 peer_ips = sock_module.gethostbyname_ex(service_name)[2]
-                
                 my_ip = sock_module.gethostbyname(sock_module.gethostname())
                 
                 for ip in peer_ips:
@@ -226,30 +230,42 @@ def discover_metadata_peers_via_dns():
                             stub = pb2_grpc.MetadataServiceStub(channel)
                             
                             # Ping to check if reachable and get NODE_ID
-                            response = stub.Ping(pb2.PingRequest(), timeout=2)
+                            response = stub.Ping(pb2.PingRequest(), timeout=1)
                             
                             if response and response.node_id:
                                 peer_node_id = int(response.node_id)
+                                unique_peers_found.add(peer_node_id)
                                 
                                 if bully and peer_node_id != NODE_ID:
-                                    with bully.nodes_lock:
-                                        if peer_node_id not in bully.all_nodes:
-                                            bully.register_node(peer_node_id, f"{ip}:{PORT}")
-                                            print(f"[Metadata] Discovered peer via DNS+gRPC: node_id={peer_node_id} at {ip}:{PORT}", flush=True)
+                                    # Add to discovered list for return
+                                    if (peer_node_id, f"{ip}:{PORT}") not in discovered_peers:
+                                        discovered_peers.append((peer_node_id, f"{ip}:{PORT}"))
+                                    
+                                    # register_node() already handles locking internally
+                                    if peer_node_id not in bully.all_nodes:
+                                        bully.register_node(peer_node_id, f"{ip}:{PORT}")
+                                        print(f"[Metadata] Discovered peer: node_id={peer_node_id} at {ip}:{PORT}", flush=True)
                             
                             channel.close()
-                        except Exception as e:
+                        except Exception:
                             # Peer not ready yet
                             pass
-            
+                
+                # If we found all expected peers, we can return early
+                if len(unique_peers_found) >= EXPECTED_METADATA_REPLICAS - 1:
+                    print(f"[Metadata] Found all expected peers ({len(unique_peers_found)}), finishing discovery", flush=True)
+                    break
+                    
             except sock_module.gaierror:
                 # DNS not yet available
                 pass
-        
+                
         except Exception as e:
-            print(f"[Metadata] DNS discovery error: {e}", flush=True)
+            print(f"[Metadata] Discovery error: {e}", flush=True)
         
-        time.sleep(8)  # Check every 8 seconds
+        time.sleep(2)
+        
+    return discovered_peers
 
 def heartbeat_sender():
     """Sends Metadata node heartbeats to multicast group"""
@@ -273,22 +289,26 @@ def heartbeat_sender():
 
 def node_monitor():
     """Checks for failed nodes and removes them, triggers re-replication"""
+    print(f"[Metadata] Node monitor started - checking every 5s for T2=10s timeout", flush=True)
     while True:
         time.sleep(5)
-        now = time.time()
+        now =time.time()
         dead_nodes = []
         
         with active_nodes_lock:
             for node_id, info in list(active_nodes.items()):
-                if now - info["last_seen"] > 10:
+                time_since_last_seen = now - info["last_seen"]
+                if time_since_last_seen > 10:  # T2 = 10 seconds
                     dead_nodes.append(node_id)
+                    print(f"[Metadata] DETECTED DEAD NODE: {node_id} (last seen {time_since_last_seen:.1f}s ago)", flush=True)
         
         for node_id in dead_nodes:
-            print(f"[Metadata] DataNode {node_id} is dead, removing", flush=True)
+            print(f"[Metadata] ⚠️  DataNode {node_id} is DEAD, removing from registry", flush=True)
             with active_nodes_lock:
                 if node_id in active_nodes:
                     del active_nodes[node_id]
             
+            print(f"[Metadata] 🔄 Triggering re-replication for dead node {node_id}", flush=True)
             # Trigger re-replication for files that lost a replica
             trigger_re_replication(node_id)
 
@@ -826,13 +846,23 @@ def serve():
     print(f"[Metadata] Discovering metadata peers via DNS...", flush=True)
     time.sleep(5)  # Give time for all replicas to start their gRPC servers
     
-    peers = discover_metadata_peers()
+    try:
+        peers = discover_metadata_peers()
+        print(f"[Metadata] DEBUG: discover_metadata_peers() returned {len(peers)} peers", flush=True)
+        
+        # Register discovered peers with Bully
+        for i, (peer_id, peer_addr) in enumerate(peers):
+            print(f"[Metadata] DEBUG: Registering peer {i+1}/{len(peers)}: {peer_id} at {peer_addr}", flush=True)
+            bully.register_node(peer_id, peer_addr)
+            print(f"[Metadata] DEBUG: Successfully registered peer {peer_id}", flush=True)
+        
+        print(f"[Metadata] Registered {len(peers)} peers with Bully", flush=True)
+    except Exception as e:
+        print(f"[Metadata] ERROR in peer discovery/registration: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
     
-    # Register discovered peers with Bully
-    for peer_id, peer_addr in peers:
-        bully.register_node(peer_id, peer_addr)
-    
-    print(f"[Metadata] Registered {len(peers)} peers with Bully", flush=True)
+    print(f"[Metadata] DEBUG: After peer registration block", flush=True)
     
     # Wait a bit more if we haven't discovered all expected peers
     if len(peers) < EXPECTED_METADATA_REPLICAS - 1:

@@ -4,6 +4,7 @@ import socket
 import struct
 import grpc
 import threading
+import uuid
 from concurrent import futures
 from pathlib import Path
 
@@ -11,38 +12,41 @@ from pathlib import Path
 import protos.service_pb2 as pb2
 import protos.service_pb2_grpc as pb2_grpc
 
-# Configuration
+# Configuration - must define STORAGE_DIR first
+STORAGE_DIR = Path("./data_node_storage")
+STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
 # Persistence for NODE_ID
 NODE_ID_FILE = STORAGE_DIR / "node_id"
-def load_or_create_node_id():
-    if NODE_ID_FILE.exists():
-        try:
-            with open(NODE_ID_FILE, "r") as f:
-                return f.read().strip()
-        except:
-            pass
-    # Generate unique ID
-    new_id = f"datanode-{socket.gethostname()}-{int(time.time())}"
-    
-    # Save it
-    try:
-        with open(NODE_ID_FILE, "w") as f:
-            f.write(new_id)
-    except:
-        pass
-    return new_id
 
-NODE_ID = os.getenv("NODE_ID", load_or_create_node_id())
+def load_or_create_node_id():
+    # Use the ACTUAL container hostname which is unique per replica
+    # Docker Swarm assigns unique hostnames like: tagfs_datanode.1.xyz123, tagfs_datanode.2.abc456, etc
+    actual_hostname = socket.gethostname()
+    
+    # For Docker Swarm replicas, the hostname IS unique
+    # Format: servicename.replicanum.containerid
+    node_id = f"datanode-{actual_hostname}"
+    
+    # Also save to file for consistency
+    try:
+        NODE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(NODE_ID_FILE, "w") as f:
+            f.write(node_id)
+    except Exception as e:
+        print(f"Warning: Could not save NODE_ID: {e}", flush=True)
+    
+    return node_id
+
+NODE_ID = load_or_create_node_id()
+print(f"[DataNode] Started with unique NODE_ID: {NODE_ID}", flush=True)
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "50051"))
 MULTICAST_GROUP = os.getenv("MULTICAST_GROUP", "224.0.0.1")
 MULTICAST_PORT = int(os.getenv("MULTICAST_PORT", "5000"))
-STORAGE_DIR = Path("./data_node_storage")
 CHUNK_SIZE = 1024 * 1024  # 1MB
 ENABLE_TLS = os.getenv("ENABLE_TLS", "false").lower() == "true"
 CERT_DIR = os.getenv("CERT_DIR", "./certs")
-
-STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 class DataNode(pb2_grpc.DataNodeServiceServicer):
     def Ping(self, request, context):
@@ -52,38 +56,70 @@ class DataNode(pb2_grpc.DataNodeServiceServicer):
         """Streaming write: Receives chunks and appends them to file"""
         file_id = None
         temp_path = None
+        final_path = None
         bytes_written = 0
         chunks_received = 0
+        file_handle = None
         
         try:
             for chunk in request_iterator:
                 chunks_received += 1
                 if not file_id:
                     file_id = chunk.file_id
-                    temp_path = STORAGE_DIR / f"{file_id}.tmp"
-                    print(f"[{NODE_ID}] Starting to receive file {file_id}", flush=True)
+                    # Use unique temp file to avoid race conditions from retries/concurrent uploads
+                    temp_filename = f"{file_id}_{uuid.uuid4()}.tmp"
+                    temp_path = STORAGE_DIR / temp_filename
+                    final_path = STORAGE_DIR / file_id
+                    # Open file ONCE and keep handle open
+                    file_handle = open(temp_path, "wb")
+                    print(f"[{NODE_ID}] Starting to receive file {file_id} (temp: {temp_filename})", flush=True)
                 
-                with open(temp_path, "ab") as f:
-                    f.write(chunk.content)
-                    bytes_written += len(chunk.content)
+                # Write to already-open file handle
+                file_handle.write(chunk.content)
+                file_handle.flush()  # Explicit flush after each chunk
+                bytes_written += len(chunk.content)
                 
                 if chunk.is_last:
                     print(f"[{NODE_ID}] Received last chunk (#{chunks_received})", flush=True)
             
             print(f"[{NODE_ID}] Received {chunks_received} chunks, {bytes_written} bytes total", flush=True)
             
-            # Finalize file
-            final_path = STORAGE_DIR / file_id
+            # Close file before rename
+            if file_handle:
+                file_handle.close()
+                file_handle = None
+            
+            # Rename temp to final
             if temp_path and temp_path.exists():
                 temp_path.rename(final_path)
             
-            print(f"[{NODE_ID}] Stored file {file_id} ({bytes_written} bytes)")
+            # CRITICAL: Verify file size matches
+            actual_size = final_path.stat().st_size
+            if actual_size != bytes_written:
+                error_msg = f"SIZE MISMATCH: wrote {bytes_written} bytes but file is {actual_size} bytes"
+                print(f"[{NODE_ID}] ERROR: {error_msg}", flush=True)
+                final_path.unlink()  # Delete corrupt file
+                return pb2.StoreResponse(success=False, message=error_msg, bytes_written=0)
+            
+            print(f"[{NODE_ID}] ✓ Stored file {file_id} ({bytes_written} bytes, verified)", flush=True)
             return pb2.StoreResponse(success=True, message="Stored successfully", bytes_written=bytes_written)
             
         except Exception as e:
-            print(f"Error storing file: {e}")
+            print(f"[{NODE_ID}] Error storing file: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            
+            # Cleanup
+            if file_handle:
+                try:
+                    file_handle.close()
+                except:
+                    pass
             if temp_path and temp_path.exists():
-                os.remove(temp_path)
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
             return pb2.StoreResponse(success=False, message=str(e), bytes_written=0)
 
     def RetrieveChunk(self, request, context):
@@ -170,7 +206,14 @@ def heartbeat_sender():
             time.sleep(5)
 
 def serve():
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    # Configure gRPC with larger message limits (critical for large files)
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        options=[
+            ('grpc.max_send_message_length', 100 * 1024 * 1024),  # 100MB
+            ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100MB
+        ]
+    )
     pb2_grpc.add_DataNodeServiceServicer_to_server(DataNode(), server)
     
     # Configure TLS if enabled

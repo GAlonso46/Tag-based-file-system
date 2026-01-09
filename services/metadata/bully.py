@@ -43,7 +43,7 @@ class BullyLeaderElection:
         self.nodes_lock = threading.Lock()
         
         # Timeouts
-        self.election_timeout = 10  # segundos - aumentado para evitar elecciones espurias
+        self.election_timeout = 15  # segundos - balance entre detección y estabilidad
         self.heartbeat_interval = 3  # segundos
         self.last_heartbeat_received = time.time()
         
@@ -91,7 +91,9 @@ class BullyLeaderElection:
         
         self.election_in_progress = True
         self.first_election_done = True
-        print(f"[Bully] Node {self.node_id} starting election", flush=True)
+        print(f"\n{'='*60}", flush=True)
+        print(f"[Bully] *** ELECTION STARTED by Node {self.node_id} ***", flush=True)
+        print(f"{'='*60}\n", flush=True)
         self.state = NodeState.CANDIDATE
         
         # Obtener nodos con ID mayor
@@ -140,7 +142,9 @@ class BullyLeaderElection:
     
     def _become_leader(self):
         """Proclamarse como líder"""
-        print(f"[Bully] Node {self.node_id} is now LEADER", flush=True)
+        print(f"\n{'='*60}", flush=True)
+        print(f"[Bully] *** NODE {self.node_id} IS NOW LEADER ***", flush=True)
+        print(f"{'='*60}\n", flush=True)
         self.state = NodeState.LEADER
         self.leader_id = self.node_id
         
@@ -231,7 +235,7 @@ class BullyLeaderElection:
     
     def handle_coordinator_message(self, leader_id):
         """Aceptar nuevo líder"""
-        print(f"[Bully] Node {leader_id} is new leader", flush=True)
+        print(f"\n[Bully] *** COORDINATOR MESSAGE: Node {leader_id} is new leader ***\n", flush=True)
         self.state = NodeState.FOLLOWER
         self.leader_id = leader_id
         self.last_heartbeat_received = time.time()

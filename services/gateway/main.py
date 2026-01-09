@@ -86,8 +86,8 @@ def get_metadata_stub():
     
     # Create new connection
     options = [
-        ('grpc.max_send_message_length', 50 * 1024 * 1024),
-        ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+        ('grpc.max_send_message_length', 100 * 1024 * 1024),
+        ('grpc.max_receive_message_length', 100 * 1024 * 1024),
         ('grpc.keepalive_time_ms', 10000),
         ('grpc.keepalive_timeout_ms', 5000),
         ('grpc.http2.min_time_between_pings_ms', 10000),
@@ -176,8 +176,8 @@ def call_metadata_with_leader_retry(method_name, request, timeout=10, max_retrie
 
 def get_datanode_stub(host, port):
     options = [
-        ('grpc.max_send_message_length', 50 * 1024 * 1024),
-        ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+        ('grpc.max_send_message_length', 100 * 1024 * 1024),
+        ('grpc.max_receive_message_length', 100 * 1024 * 1024),
     ]
     
     credentials = get_grpc_credentials()
@@ -378,9 +378,15 @@ async def download_file(file_id: str, current_user: User = Depends(get_current_a
         
         chunks_iter = selected_replica['stub'].RetrieveChunk(pb2.FileRequest(file_id=file_id), timeout=30)
         
+        
         def stream():
+            bytes_received = 0
+            chunk_count = 0
             for chunk in chunks_iter:
+                chunk_count += 1
+                bytes_received += len(chunk.content)
                 yield chunk.content
+            print(f"[Gateway] Download completed: {chunk_count} chunks, {bytes_received} bytes", flush=True)
                 
         return StreamingResponse(
             stream(), 
