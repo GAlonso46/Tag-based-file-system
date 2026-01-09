@@ -110,37 +110,31 @@ def get_metadata_stub():
     return _metadata_stub
 
 def get_all_metadata_stubs():
-    """Get stubs for ALL metadata replicas by resolving DNS"""
-    import socket
+    """Get stubs for ALL metadata replicas using round-robin DNS queries"""
     options = [
         ('grpc.max_send_message_length', 100 * 1024 * 1024),
         ('grpc.max_receive_message_length', 100 * 1024 * 1024),
     ]
     
-    stubs = []
-    try:
-        # Resolve all IPs for metadata service
-        ips = socket.getaddrinfo(METADATA_HOST, METADATA_PORT, socket.AF_INET, socket.SOCK_STREAM)
-        unique_ips = list(set([ip[4][0] for ip in ips]))
-        
-        credentials = get_grpc_credentials()
-        for ip in unique_ips:
-            try:
-                if credentials:
-                    channel = grpc.secure_channel(f'{ip}:{METADATA_PORT}', credentials, options=options)
-                else:
-                    channel = grpc.insecure_channel(f'{ip}:{METADATA_PORT}', options=options)
-                stub = pb2_grpc.MetadataServiceStub(channel)
-                stubs.append(stub)
-            except Exception as e:
-                print(f"[Gateway] Failed to connect to metadata {ip}: {e}", flush=True)
-        
-        print(f"[Gateway] Connected to {len(stubs)} metadata nodes", flush=True)
-    except Exception as e:
-        print(f"[Gateway] Failed to resolve metadata IPs: {e}", flush=True)
-        # Fallback to single stub
-        stubs = [get_metadata_stub()]
+    # Expected number of metadata replicas
+    EXPECTED_REPLICAS = int(os.getenv("EXPECTED_METADATA_REPLICAS", "3"))
     
+    stubs = []
+    credentials = get_grpc_credentials()
+    
+    # Create multiple connections - Docker DNS will round-robin to different IPs
+    for i in range(EXPECTED_REPLICAS):
+        try:
+            if credentials:
+                channel = grpc.secure_channel(f'{METADATA_HOST}:{METADATA_PORT}', credentials, options=options)
+            else:
+                channel = grpc.insecure_channel(f'{METADATA_HOST}:{METADATA_PORT}', options=options)
+            stub = pb2_grpc.MetadataServiceStub(channel)
+            stubs.append(stub)
+        except Exception as e:
+            print(f"[Gateway] Failed to connect to metadata replica {i+1}: {e}", flush=True)
+    
+    print(f"[Gateway] Created {len(stubs)} metadata connections (expecting {EXPECTED_REPLICAS})", flush=True)
     return stubs if stubs else [get_metadata_stub()]
 
 def call_metadata_with_leader_retry(method_name, request, timeout=10, max_retries=5):
