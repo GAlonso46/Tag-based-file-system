@@ -109,6 +109,40 @@ def get_metadata_stub():
     _metadata_stub = pb2_grpc.MetadataServiceStub(_metadata_channel)
     return _metadata_stub
 
+def get_all_metadata_stubs():
+    """Get stubs for ALL metadata replicas by resolving DNS"""
+    import socket
+    options = [
+        ('grpc.max_send_message_length', 100 * 1024 * 1024),
+        ('grpc.max_receive_message_length', 100 * 1024 * 1024),
+    ]
+    
+    stubs = []
+    try:
+        # Resolve all IPs for metadata service
+        ips = socket.getaddrinfo(METADATA_HOST, METADATA_PORT, socket.AF_INET, socket.SOCK_STREAM)
+        unique_ips = list(set([ip[4][0] for ip in ips]))
+        
+        credentials = get_grpc_credentials()
+        for ip in unique_ips:
+            try:
+                if credentials:
+                    channel = grpc.secure_channel(f'{ip}:{METADATA_PORT}', credentials, options=options)
+                else:
+                    channel = grpc.insecure_channel(f'{ip}:{METADATA_PORT}', options=options)
+                stub = pb2_grpc.MetadataServiceStub(channel)
+                stubs.append(stub)
+            except Exception as e:
+                print(f"[Gateway] Failed to connect to metadata {ip}: {e}", flush=True)
+        
+        print(f"[Gateway] Connected to {len(stubs)} metadata nodes", flush=True)
+    except Exception as e:
+        print(f"[Gateway] Failed to resolve metadata IPs: {e}", flush=True)
+        # Fallback to single stub
+        stubs = [get_metadata_stub()]
+    
+    return stubs if stubs else [get_metadata_stub()]
+
 def call_metadata_with_leader_retry(method_name, request, timeout=10, max_retries=5):
     """
     Call metadata RPC with automatic retry to find leader.
@@ -404,7 +438,9 @@ async def list_files(
     tags: Optional[str] = None, 
     current_user: User = Depends(get_current_active_user)
 ):
-    meta = get_metadata_stub()
+    # Query ALL metadata replicas and combine results
+    stubs = get_all_metadata_stubs()
+    
     req = pb2.ListRequest()
     if tags:
         req.tags_filter.extend(tags.split(","))
@@ -413,21 +449,29 @@ async def list_files(
     if current_user.is_admin != 1:
         req.owner_filter = str(current_user.id)
     # If admin, no owner_filter = see all files
-        
-    resp = meta.ListFiles(req, timeout=10)
     
-    result = []
-    for f in resp.files:
-        result.append({
-            "id": f.file_id,
-            "name": f.metadata.filename,
-            "tags": list(f.metadata.tags),
-            "size": f.metadata.size,
-            "owner_id": f.metadata.owner_id,
-            "url": f"/files/{f.file_id}",
-            "created_at": f.metadata.created_at if hasattr(f.metadata, 'created_at') else ""
-        })
-    return result
+    # Collect files from all metadata nodes
+    all_files = {}
+    for stub in stubs:
+        try:
+            resp = stub.ListFiles(req, timeout=5)
+            for f in resp.files:
+                # Use file_id as key to deduplicate
+                if f.file_id not in all_files:
+                    all_files[f.file_id] = {
+                        "id": f.file_id,
+                        "name": f.metadata.filename,
+                        "tags": list(f.metadata.tags),
+                        "size": f.metadata.size,
+                        "owner_id": f.metadata.owner_id,
+                        "url": f"/files/{f.file_id}",
+                        "created_at": f.metadata.created_at if hasattr(f.metadata, 'created_at') else ""
+                    }
+        except Exception as e:
+            print(f"[Gateway] Failed to query metadata node: {e}", flush=True)
+            continue
+    
+    return list(all_files.values())
 
 @app.get("/tags")
 async def get_all_tags(current_user: User = Depends(get_current_active_user)):

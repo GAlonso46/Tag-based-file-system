@@ -113,6 +113,9 @@ service MetadataService {
   
   // Merkle Tree Anti-Entropy
   rpc CompareMerkleRoot (MerkleRootRequest) returns (MerkleRootResponse);
+  
+  // Health Check for Peer Discovery
+  rpc Ping (PingRequest) returns (PingResponse);
 }
 
 message WriteRequest {

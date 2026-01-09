@@ -18,12 +18,14 @@ services:
     volumes:
       - gateway-store:/app/tags_data
     deploy:
-      replicas: 1
+      replicas: 2
       update_config:
         parallelism: 1
         delay: 10s
       placement:
-        constraints: [node.role == manager]
+        preferences:
+          - spread: node.id
+        max_replicas_per_node: 1  # 1 gateway por nodo
 
   # 2. Metadata Service (Control) - 3 replicas for Bully leader election
   metadata:
@@ -44,7 +46,9 @@ services:
         parallelism: 1
         delay: 10s
       placement:
-        # No usar preferences para tener control manual
+        # Distribuir entre nodos: spread para distribución cruzada
+        preferences:
+          - spread: node.id
         max_replicas_per_node: 2  # Máximo 2 metadata por nodo
     volumes:
       - metadata-store:/app/metadata_storage
@@ -64,8 +68,10 @@ services:
       # We rely on code generating unique ID based on hostname/time.
     deploy:
       replicas: 3
-      # Distribuir: 1 en PC1, 2 en PC2
+      # Distribuir entre nodos: spread para distribución cruzada
       placement:
+        preferences:
+          - spread: node.id
         max_replicas_per_node: 2  # Máximo 2 datanodes por nodo
     volumes:
       - datanode-store:/app/data_node_storage
@@ -78,9 +84,11 @@ services:
     networks:
       - tagfs-overlay
     deploy:
-      replicas: 1
+      replicas: 2
       placement:
-        constraints: [node.role == manager]
+        preferences:
+          - spread: node.id
+        max_replicas_per_node: 1  # 1 frontend por nodo
 
 networks:
   tagfs-overlay:
