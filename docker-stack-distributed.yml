@@ -44,9 +44,8 @@ services:
         parallelism: 1
         delay: 10s
       placement:
-        preferences:
-          - spread: node.id
-        # constraints: [node.role == manager]
+        # No usar preferences para tener control manual
+        max_replicas_per_node: 2  # Máximo 2 metadata por nodo
     volumes:
       - metadata-store:/app/metadata_storage
 
@@ -65,11 +64,9 @@ services:
       # We rely on code generating unique ID based on hostname/time.
     deploy:
       replicas: 3
-      # Spread replicas across different nodes for Fault Tolerance
+      # Distribuir: 1 en PC1, 2 en PC2
       placement:
-        preferences:
-          - spread: node.id
-      #   constraints: [node.role == worker]
+        max_replicas_per_node: 2  # Máximo 2 datanodes por nodo
     volumes:
       - datanode-store:/app/data_node_storage
 
