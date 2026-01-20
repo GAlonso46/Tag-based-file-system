@@ -34,6 +34,15 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 # Use hostname to avoid collisions in shared volume
 hostname = socket.gethostname()
 FILES_DB = DATA_DIR / f"files_shared.json"
+
+if not FILES_DB.exists():
+    FILES_DB.parent.mkdir(parents=True, exist_ok=True)
+    with open(FILES_DB, 'w') as f:
+        json.dump({}, f)  # Archivo JSON vacío
+    print(f"[Metadata] Created new shared file: {FILES_DB}")
+else:
+    print(f"[Metadata] Using existing shared file: {FILES_DB}")
+    
 ENABLE_TLS = os.getenv("ENABLE_TLS", "false").lower() == "true"
 CERT_DIR = os.getenv("CERT_DIR", "./certs")
 
