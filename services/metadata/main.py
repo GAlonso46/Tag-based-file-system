@@ -33,13 +33,13 @@ DATA_DIR = Path("./metadata_storage")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 # Use hostname to avoid collisions in shared volume
 hostname = socket.gethostname()
-FILES_DB = DATA_DIR / f"files_{hostname}.json"
+FILES_DB = DATA_DIR / f"files_shared.json"
 ENABLE_TLS = os.getenv("ENABLE_TLS", "false").lower() == "true"
 CERT_DIR = os.getenv("CERT_DIR", "./certs")
 
 # Bully configuration
 # Persistence for NODE_ID to prevent identity loss on restart
-NODE_ID_FILE = DATA_DIR / f"node_id_{hostname}"
+NODE_ID_FILE = DATA_DIR / f"node_id_shared"
 def load_or_create_node_id():
     if NODE_ID_FILE.exists():
         try:
