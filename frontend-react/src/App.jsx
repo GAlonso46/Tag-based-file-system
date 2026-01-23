@@ -70,8 +70,8 @@ function App() {
     setEditModalOpen(true);
   };
 
-  const handleSaveTags = async (filename, tags) => {
-    const success = await updateTags(filename, tags);
+  const handleSaveTags = async (fileId, tags) => {
+    const success = await updateTags(fileId, tags);
     if (success) {
       refreshStats();
     }

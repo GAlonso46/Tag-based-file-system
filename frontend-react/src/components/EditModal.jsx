@@ -28,16 +28,20 @@ export const EditModal = ({ isOpen, file, onClose, onSave }) => {
     };
 
     const handleSave = async () => {
-        const filename = file.filename || file.name; // Soportar ambos formatos
-        console.log('💾 Guardando tags para:', filename, 'Tags:', tags); // Debug
+        // 1. Intentamos obtener primero el ID (UUID), si no existe usamos el nombre como respaldo
+        const fileId = file.id || file.file_id || file.filename || file.name;
         
-        if (!file || !filename) {
-            console.error('❌ Error: file o filename es undefined', file);
+        console.log('💾 Guardando tags para el ID:', fileId, 'Tags:', tags); // Debug
+        
+        // 2. Verificamos que tengamos una identidad válida
+        if (!file || !fileId) {
+            console.error('❌ Error: El archivo no tiene un ID válido', file);
             return;
         }
         
         setSaving(true);
-        const success = await onSave(filename, tags);
+        // 3. Enviamos el fileId (que ahora será el UUID si está presente)
+        const success = await onSave(fileId, tags);
         setSaving(false);
 
         if (success) {

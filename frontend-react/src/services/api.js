@@ -47,15 +47,16 @@ export const uploadFile = async (file, tags) => {
 };
 
 // Actualizar tags de un archivo
-export const updateFileTags = async (filename, tags) => {
-    console.log('🔄 API: Actualizando tags para:', filename, 'Tags:', tags); // Debug
+export const updateFileTags = async (fileId, tags) => { // Cambiado de filename a fileId
+    console.log('🔄 API: Realizando PATCH a ID:', fileId); 
     
-    if (!filename) {
-        console.error('❌ API: filename es undefined o vacío');
-        throw new Error('Filename es requerido');
+    if (!fileId) {
+        console.error('❌ API: fileId es undefined o vacío');
+        throw new Error('ID de archivo es requerido');
     }
     
-    const response = await fetch(`${API_URL}/files/${filename}/tags`, {
+    // Ahora la URL usará el UUID, resultando en /files/22b56017.../tags
+    const response = await fetch(`${API_URL}/files/${fileId}/tags`, {
         method: 'PATCH',
         headers: getAuthHeaders(),
         body: JSON.stringify({ tags })

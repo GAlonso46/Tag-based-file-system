@@ -43,9 +43,9 @@ export const useFiles = () => {
         }
     };
 
-    const updateTags = async (filename, tags) => {
+    const updateTags = async (fileId, tags) => { // Cambiado de filename a fileId
         try {
-            await updateFileTags(filename, tags);
+            await updateFileTags(fileId, tags); // Esta es la función de api.js
             showNotification('Tags actualizados', 'success');
             await loadFiles();
             return true;
