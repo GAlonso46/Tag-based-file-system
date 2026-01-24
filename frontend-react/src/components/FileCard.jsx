@@ -18,8 +18,13 @@ export const FileCard = ({ file, onEdit, onDelete }) => {
     };
 
     const handleDelete = () => {
+        // 1. Identificamos el ID único (UUID)
+        const fileId = file.id || file.file_id || file.filename || file.name;
+        const filename = file.filename || file.name;
+
         if (window.confirm(`¿Eliminar ${filename}?`)) {
-            onDelete(filename);
+            // 2. Enviamos el fileId
+            onDelete(fileId);
         }
     };
 

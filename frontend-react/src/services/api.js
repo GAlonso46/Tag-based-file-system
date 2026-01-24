@@ -67,14 +67,14 @@ export const updateFileTags = async (fileId, tags) => { // Cambiado de filename 
 };
 
 // Eliminar archivo
-export const deleteFile = async (filename) => {
+export const deleteFile = async (fileId) => {
     const token = localStorage.getItem('token');
     const headers = {};
     if (token) {
         headers['Authorization'] = `Bearer ${token}`;
     }
 
-    const response = await fetch(`${API_URL}/files/${filename}`, {
+    const response = await fetch(`${API_URL}/files/${fileId}`, {
         method: 'DELETE',
         headers: headers
     });

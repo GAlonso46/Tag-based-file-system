@@ -20,7 +20,7 @@ export const FileGrid = ({ files, loading, onEdit, onDelete }) => {
         <div className="file-grid">
             {files.map(file => (
                 <FileCard
-                    key={file.filename || file.name}
+                    key={file.id || file.file_id || file.filename || file.name}
                     file={file}
                     onEdit={onEdit}
                     onDelete={onDelete}

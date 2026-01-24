@@ -78,8 +78,8 @@ function App() {
     return success;
   };
 
-  const handleDelete = async (filename) => {
-    const success = await remove(filename);
+  const handleDelete = async (fileId) => {
+    const success = await remove(fileId);
     if (success) {
       refreshStats();
     }

@@ -55,9 +55,9 @@ export const useFiles = () => {
         }
     };
 
-    const remove = async (filename) => {
+    const remove = async (fileId) => {
         try {
-            await deleteFile(filename);
+            await deleteFile(fileId);
             showNotification('Archivo eliminado', 'success');
             await loadFiles();
             return true;
