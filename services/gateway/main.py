@@ -250,10 +250,11 @@ async def upload_file(
         filename = file.filename
         size = len(content)
         normalized_tags = normalize_tags(tags) if tags else []
-        
-        # 1. Ask Metadata where to put it (with leader retry)
-        alloc = call_metadata_with_leader_retry(
-            'AssignWrite',
+
+        meta = get_metadata_stub()
+
+        # Ask Metadata where to put it
+        alloc = meta.AssignWrite(
             pb2.WriteRequest(
                 filename=filename,
                 size=size,
@@ -263,169 +264,125 @@ async def upload_file(
             ),
             timeout=10
         )
-        
+
         file_id = alloc.file_id
         target_nodes = alloc.target_nodes
-        
+
         if not target_nodes:
             raise HTTPException(503, "No storage nodes available")
-        
-        print(f"[Gateway] Uploading file {file_id} to {len(target_nodes)} DataNodes", flush=True)
-            
-        # 2. Parallel Upload to DataNodes (Quorum W=2)
-        # Use asyncio to upload to multiple nodes concurrently
-        success_count = 0
-        upload_results = []
-        
-        # Create thread pool executor for blocking gRPC calls
+
+        success_nodes = []
+
         loop = asyncio.get_event_loop()
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(target_nodes))
-        
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(target_nodes)
+        )
+
         def upload_to_node(node):
-            """Upload file to a single DataNode"""
             try:
-                print(f"[Gateway] Uploading to node {node.node_id} at {node.address}:{node.port}", flush=True)
                 ds = get_datanode_stub(node.address, node.port)
-                # IMPORTANT: Create a NEW generator for each thread, don't share!
-                # Sharing a generator across threads causes chunks to be split between nodes
-                resp = ds.StoreChunk(chunk_generator(file_id, content), timeout=60)  # Increased timeout
+                resp = ds.StoreChunk(
+                    chunk_generator(file_id, content),
+                    timeout=60
+                )
                 if resp.success:
-                    print(f"[Gateway] Successfully stored on node {node.node_id} ({resp.bytes_written} bytes)", flush=True)
-                    return (node.node_id, True, None, resp.bytes_written)
-                else:
-                    print(f"[Gateway] Failed to store on node {node.node_id}: {resp.message}", flush=True)
-                    return (node.node_id, False, resp.message, 0)
-            except Exception as e:
-                print(f"[Gateway] Failed to upload to {node.node_id}: {e}", flush=True)
-                import traceback
-                traceback.print_exc()
-                return (node.node_id, False, str(e), 0)
-        
-        # Run uploads in parallel
-        tasks = [loop.run_in_executor(executor, upload_to_node, node) for node in target_nodes]
-        upload_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Count successful uploads
-        for result in upload_results:
-            if isinstance(result, tuple) and result[1]:  # result is (node_id, success, message)
-                success_count += 1
-        
-        print(f"[Gateway] Upload complete: {success_count}/{len(target_nodes)} successful", flush=True)
-        
-        # Quorum W=2 as per informe_sd.md: N=3, W=2, R=2
-        # Ensures strong consistency and durability
-        required_writes = min(2, len(target_nodes))  # W=2, but handle cases with fewer nodes
-        
-        if success_count < required_writes:
-            # Fail if we couldn't meet write quorum
-            raise HTTPException(500, f"Write quorum not met: Stored on {success_count}/{len(target_nodes)} nodes (Required: {required_writes}).")
-            
-        # 3. Commit Metadata (with leader retry)
-        # Collect IDs of successful nodes
-        successful_node_ids = []
-        for result in upload_results:
-            if isinstance(result, tuple) and result[1]:
-                successful_node_ids.append(result[0])
-        
-        call_metadata_with_leader_retry(
-            'CommitWrite',
+                    return node.node_id
+            except:
+                pass
+            return None
+
+        tasks = [
+            loop.run_in_executor(executor, upload_to_node, node)
+            for node in target_nodes
+        ]
+
+        results = await asyncio.gather(*tasks)
+
+        success_nodes = [r for r in results if r]
+
+        # AP rule
+        if not success_nodes:
+            raise HTTPException(
+                503, "Could not store file on any DataNode"
+            )
+
+        # Commit metadata
+        meta.CommitWrite(
             pb2.CommitRequest(
                 file_id=file_id,
                 size=size,
                 success=True,
-                successful_nodes=successful_node_ids
+                successful_nodes=success_nodes
             ),
             timeout=10
         )
-        
+
         return {
             "name": filename,
-            "tags": list(normalized_tags),  # Convert protobuf repeated field to list
+            "tags": list(normalized_tags),
             "size": size,
-            "url": f"/files/{file_id}" # Use ID now, not filename
+            "url": f"/files/{file_id}"
         }
 
     except Exception as e:
         print(e)
         raise HTTPException(500, str(e))
 
+
 @app.get("/files/{file_id}")
-async def download_file(file_id: str, current_user: User = Depends(get_current_active_user)):
+async def download_file(
+    file_id: str,
+    current_user: User = Depends(get_current_active_user)
+):
     meta = get_metadata_stub()
+
     try:
-        # 1. Locate File
-        loc = meta.LocateFile(pb2.FileRequest(file_id=file_id), timeout=10)
-        
+        loc = meta.LocateFile(
+            pb2.FileRequest(file_id=file_id),
+            timeout=10
+        )
+
         if not loc.replica_nodes:
-            raise HTTPException(404, "File chunks not found")
-        
-        # 2. Read Quorum R=2: Query 2 replicas as per informe_sd.md
-        # N=3, W=2, R=2 ensures R+W>N for strong consistency
-        import random
-        
-        # Required read quorum
-        READ_QUORUM = 2
-        
-        # Select R=2 replicas (or all if fewer available)
-        read_quorum = min(READ_QUORUM, len(loc.replica_nodes))
-        
-        if read_quorum < READ_QUORUM:
-            print(f"[Gateway] Warning: Only {len(loc.replica_nodes)} replicas available, R=2 not satisfied")
-        
-        selected_nodes = random.sample(list(loc.replica_nodes), read_quorum)
-        
-        print(f"[Gateway] Read Quorum R={read_quorum}: Querying {len(selected_nodes)} replicas for file {file_id}", flush=True)
-        
-        # Query all selected replicas
-        replica_responses = []
-        for node in selected_nodes:
+            raise HTTPException(404, "File not found")
+
+        # Try replicas one by one
+        for node in loc.replica_nodes:
             try:
                 ds = get_datanode_stub(node.address, node.port)
-                # Test connection by pinging
                 ds.Ping(pb2.PingRequest(), timeout=2)
-                replica_responses.append({
-                    'node': node,
-                    'stub': ds
-                })
-                print(f"[Gateway] Replica {node.node_id} reachable", flush=True)
+
+                chunks_iter = ds.RetrieveChunk(
+                    pb2.FileRequest(file_id=file_id),
+                    timeout=30
+                )
+
+                def stream():
+                    for chunk in chunks_iter:
+                        yield chunk.content
+
+                return StreamingResponse(
+                    stream(),
+                    media_type="application/octet-stream",
+                    headers={
+                        "Content-Disposition":
+                        f"attachment; filename={loc.metadata.filename}"
+                    }
+                )
+
             except Exception as e:
-                print(f"[Gateway] Failed to connect to replica {node.node_id}: {e}", flush=True)
+                print(
+                    f"[Gateway] Replica {node.node_id} failed: {e}",
+                    flush=True
+                )
                 continue
-        
-        if not replica_responses:
-            raise HTTPException(503, "No replicas available for read quorum")
-        
-        if len(replica_responses) < READ_QUORUM:
-            print(f"[Gateway] Warning: Read quorum not satisfied ({len(replica_responses)}/{READ_QUORUM} replicas)", flush=True)
-        
-        # Select first available replica (metadata already has authoritative version from leader)
-        # Version vector comparison already done at metadata level via Gossip
-        selected_replica = replica_responses[0]
-        
-        print(f"[Gateway] Reading file {file_id} from replica {selected_replica['node'].node_id}", flush=True)
-        
-        chunks_iter = selected_replica['stub'].RetrieveChunk(pb2.FileRequest(file_id=file_id), timeout=30)
-        
-        
-        def stream():
-            bytes_received = 0
-            chunk_count = 0
-            for chunk in chunks_iter:
-                chunk_count += 1
-                bytes_received += len(chunk.content)
-                yield chunk.content
-            print(f"[Gateway] Download completed: {chunk_count} chunks, {bytes_received} bytes", flush=True)
-                
-        return StreamingResponse(
-            stream(), 
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": f"attachment; filename={loc.metadata.filename}"}
-        )
-        
+
+        raise HTTPException(503, "No replicas available")
+
     except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.NOT_FOUND:
             raise HTTPException(404, "File not found")
-        raise HTTPException(500, f"RPC Error: {e.details()}")
+        raise HTTPException(500, e.details())
+
 
 @app.delete("/files/{file_id}")
 async def delete_file(file_id: str, current_user: User = Depends(get_current_active_user)):
