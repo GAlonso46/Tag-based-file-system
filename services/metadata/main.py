@@ -22,7 +22,7 @@ logger = logging.getLogger("MetadataService")
 HOST = "0.0.0.0"
 PORT = int(os.getenv("PORT", "50051"))
 
-DATA_DIR = Path("/app/data")
+DATA_DIR = Path("/app/metadata_storage")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 FILES_DB = DATA_DIR / "files_shared.json"
