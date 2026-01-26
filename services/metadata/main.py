@@ -9,6 +9,8 @@ import uuid
 import logging
 from concurrent import futures
 from pathlib import Path
+import fcntl
+from sync_manager import SyncManager
 
 # Ajusta imports según tu estructura
 import protos.service_pb2 as pb2
@@ -38,6 +40,10 @@ active_nodes = {}       # { node_id: { address, port, last_seen } }
 active_nodes_lock = threading.Lock()
 metadata_lock = threading.Lock()
 
+current_lamport_time = 0
+node_id = socket.gethostname() # Usado como ID único
+sync_manager = SyncManager(node_id=node_id)
+
 # ================= PERSISTENCIA =================
 
 def load_state():
@@ -63,6 +69,45 @@ def save_state():
         except Exception as e:
             logger.error(f"Error guardando estado: {e}")
 
+def save_state_locked(incoming_files=None):
+    """
+    Versión mejorada de save_state que usa locks de archivo 
+    y comparación de versiones para evitar redundancia.
+    """
+    global files_metadata, current_lamport_time
+    
+    with metadata_lock:
+        try:
+            with open(FILES_DB, "r+") as f:
+                # Bloqueo exclusivo del archivo
+                fcntl.flock(f, fcntl.LOCK_EX)
+                
+                # Leer estado actual del disco
+                disk_data = json.load(f) if os.path.getsize(FILES_DB) > 0 else {}
+                
+                changed = False
+                # Si recibimos datos vía Gossip, comparamos versiones
+                if incoming_files:
+                    for fid, incoming_meta in incoming_files.items():
+                        local_meta = disk_data.get(fid)
+                        # Solo actualizar si la versión (lamport) es mayor
+                        if not local_meta or incoming_meta['lamport_time'] > local_meta.get('lamport_time', -1):
+                            disk_data[fid] = incoming_meta
+                            changed = True
+                else:
+                    # Si es una escritura local (Commit/UpdateTags), usamos el estado en memoria
+                    disk_data = files_metadata
+                    changed = True
+
+                if changed:
+                    f.seek(0)
+                    json.dump(disk_data, f, indent=2)
+                    f.truncate()
+                    files_metadata = disk_data # Sincronizar memoria con disco
+                
+                fcntl.flock(f, fcntl.LOCK_UN) # Liberar lock
+        except Exception as e:
+            logger.error(f"Error en persistencia segura: {e}")
 # ================= HEARTBEATS (UDP) =================
 
 MULTICAST_PORT = 5000
@@ -138,13 +183,15 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
         return resp
 
     def CommitWrite(self, request, context):
-        """Gateway confirma escritura exitosa"""
+        global current_lamport_time
         if request.file_id not in self.pending_uploads:
-            return pb2.CommitResponse(success=False, message="Upload expirado o no encontrado")
+            return pb2.CommitResponse(success=False)
 
         data = self.pending_uploads.pop(request.file_id)
+        
+        # Incrementar reloj Lamport local para nueva escritura
+        current_lamport_time += 1
 
-        # Crear metadata final
         meta_entry = {
             "filename": data["filename"],
             "size": request.size,
@@ -153,16 +200,42 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
             "mime_type": data["mime_type"],
             "replicas": list(request.successful_nodes),
             "created_at": int(time.time()),
-            "is_deleted": False  # Para soporte de soft-delete
+            "is_deleted": False,
+            "lamport_time": current_lamport_time # Asignar versión
         }
 
         with metadata_lock:
             files_metadata[request.file_id] = meta_entry
         
-        save_state()
-        logger.info(f"Archivo commit exitoso: {data['filename']} ({request.file_id})")
+        save_state_locked()
+        # DISPARAR GOSSIP
+        sync_manager.broadcast_update(request.file_id, meta_entry)
+        
         return pb2.CommitResponse(success=True)
 
+    def GossipPush(self, request, context):
+        global current_lamport_time
+        
+        incoming_data = {}
+        for f in request.files:
+            incoming_data[f.file_id] = {
+                "filename": f.filename,
+                "size": f.size,
+                "tags": list(f.tags),
+                "owner_id": f.owner,
+                "replicas": list(f.replicas),
+                "created_at": f.created_at,
+                "lamport_time": f.lamport_time,
+                "is_deleted": False
+            }
+            # Sincronizar el reloj Lamport global (Max + 1)
+            current_lamport_time = max(current_lamport_time, f.lamport_time)
+        
+        # Intentar persistir (la función save_state_locked filtrará si ya es viejo)
+        save_state_locked(incoming_files=incoming_data)
+        
+        return pb2.GossipAck(ok=True, receiver_lamport_time=current_lamport_time)
+    
     def LocateFile(self, request, context):
         """Gateway busca nodos para descargar"""
         fid = request.file_id
@@ -230,23 +303,35 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
         return resp
 
     def DeleteFile(self, request, context):
-        """Implementación de Soft Delete"""
+        """Implementación de Soft Delete con propagación Gossip"""
+        global current_lamport_time
         fid = request.file_id
         
         with metadata_lock:
             if fid not in files_metadata:
                 context.abort(grpc.StatusCode.NOT_FOUND, "Archivo no existe")
             
-            # Marcamos como borrado (Soft Delete)
+            # 1. Incrementar versión lógica
+            current_lamport_time += 1
+            
+            # 2. Marcar como borrado y actualizar versión
             files_metadata[fid]["is_deleted"] = True
-            # Opcional: limpiar réplicas de la lista, pero mejor mantener historial por ahora
+            files_metadata[fid]["lamport_time"] = current_lamport_time
+            
+            meta_to_sync = files_metadata[fid]
         
-        save_state()
-        logger.info(f"Archivo eliminado (soft): {fid}")
+        # 3. Persistencia segura con Lock
+        save_state_locked()
+        
+        # 4. Propagar el "Tombstone" (lápida) a los demás nodos
+        sync_manager.broadcast_update(fid, meta_to_sync)
+        
+        logger.info(f"Archivo eliminado (soft) y propagado: {fid} (v.{current_lamport_time})")
         return pb2.DeleteResponse(success=True)
 
     def UpdateTags(self, request, context):
-        """Actualizar lista completa de etiquetas"""
+        """Actualizar etiquetas con propagación Gossip"""
+        global current_lamport_time
         fid = request.file_id
         new_tags = list(request.tags)
 
@@ -254,12 +339,24 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
             if fid not in files_metadata:
                 context.abort(grpc.StatusCode.NOT_FOUND, "Archivo no existe")
             
+            # 1. Incrementar versión lógica
+            current_lamport_time += 1
+            
+            # 2. Actualizar datos y versión
             files_metadata[fid]["tags"] = new_tags
+            files_metadata[fid]["lamport_time"] = current_lamport_time
+            
+            meta_to_sync = files_metadata[fid]
         
-        save_state()
-        logger.info(f"Tags actualizados para {fid}: {new_tags}")
+        # 3. Persistencia segura con Lock
+        save_state_locked()
+        
+        # 4. Propagar actualización a la red
+        sync_manager.broadcast_update(fid, meta_to_sync)
+        
+        logger.info(f"Tags actualizados y propagados para {fid}: {new_tags} (v.{current_lamport_time})")
         return pb2.TagResponse(success=True, current_tags=new_tags)
-
+    
 # ================= ARRANQUE =================
 
 def serve():
