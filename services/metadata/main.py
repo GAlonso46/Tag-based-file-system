@@ -214,28 +214,29 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
         return pb2.CommitResponse(success=True)
 
     def GossipPull(self, request, context):
-            """Servidor: Entrega toda la DB local al solicitante"""
-            logger.info(f"Recibida solicitud GossipPull del nodo {request.requester_id}")
-            
-            entries = []
-            with metadata_lock:
-                for fid, meta in files_metadata.items():
-                    entries.append(pb2.FileMetadataEntry(
-                        file_id=fid,
-                        filename=meta['filename'],
-                        tags=meta['tags'],
-                        owner=meta['owner_id'],
-                        size=meta['size'],
-                        replicas=meta['replicas'],
-                        created_at=meta['created_at'],
-                        lamport_time=meta.get('lamport_time', 0)
-                    ))
-            
-            return pb2.GossipUpdate(
-                sender_id=int(hash(node_id) % 10**8),
-                sender_lamport_time=current_lamport_time,
-                files=entries
-            )
+        """Servidor: Entrega toda la DB local al solicitante"""
+        logger.info(f"Recibida solicitud GossipPull del nodo {request.requester_id}")
+        
+        entries = []
+        with metadata_lock:
+            for fid, meta in files_metadata.items():
+                # USO DE .get() PARA EVITAR KEYERRORS EN DATOS ANTIGUOS
+                entries.append(pb2.FileMetadataEntry(
+                    file_id=fid,
+                    filename=meta.get('filename', "unknown"),
+                    tags=meta.get('tags', []),
+                    owner=meta.get('owner_id', ""),  
+                    size=meta.get('size', 0),
+                    replicas=meta.get('replicas', []),
+                    created_at=meta.get('created_at', 0),
+                    lamport_time=meta.get('lamport_time', 0)
+                ))
+        
+        return pb2.GossipUpdate(
+            sender_id=int(hash(node_id) % 10**8),
+            sender_lamport_time=current_lamport_time,
+            files=entries
+        )
 
     def process_gossip_update(self, update):
         """Procesa una actualización (sea por Push o por Pull)"""
@@ -250,7 +251,7 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
                 "replicas": list(f.replicas),
                 "created_at": f.created_at,
                 "lamport_time": f.lamport_time,
-                "is_deleted": False # En una versión pro, aquí manejarías el campo is_deleted si estuviera en el .proto
+                "is_deleted": False 
             }
             current_lamport_time = max(current_lamport_time, f.lamport_time)
         

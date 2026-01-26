@@ -12,34 +12,42 @@ from pathlib import Path
 import protos.service_pb2 as pb2
 import protos.service_pb2_grpc as pb2_grpc
 
-# Configuration - must define STORAGE_DIR first
-STORAGE_DIR = Path("./data_node_storage")
-STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+# ===================== STORAGE CONFIGURATION =====================
 
-# Persistence for NODE_ID
-NODE_ID_FILE = STORAGE_DIR / "node_id"
+# Base directory shared by all DataNode containers (via Docker volume)
+BASE_STORAGE_DIR = Path("./data_node_storage")
+BASE_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+# ===================== NODE ID =====================
 
 def load_or_create_node_id():
     # Use the ACTUAL container hostname which is unique per replica
-    # Docker Swarm assigns unique hostnames like: tagfs_datanode.1.xyz123, tagfs_datanode.2.abc456, etc
     actual_hostname = socket.gethostname()
-    
-    # For Docker Swarm replicas, the hostname IS unique
-    # Format: servicename.replicanum.containerid
+    # For Docker Swarm replicas, hostname IS already unique
     node_id = f"datanode-{actual_hostname}"
-    
-    # Also save to file for consistency
-    try:
-        NODE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(NODE_ID_FILE, "w") as f:
-            f.write(node_id)
-    except Exception as e:
-        print(f"Warning: Could not save NODE_ID: {e}", flush=True)
-    
+
     return node_id
 
 NODE_ID = load_or_create_node_id()
-print(f"[DataNode] Started with unique NODE_ID: {NODE_ID}", flush=True)
+
+# ===================== PER-NODE STORAGE DIR =====================
+
+# Each DataNode stores files in its own subdirectory
+STORAGE_DIR = BASE_STORAGE_DIR / NODE_ID
+STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Persist NODE_ID inside its own directory
+NODE_ID_FILE = STORAGE_DIR / "node_id"
+
+try:
+    with open(NODE_ID_FILE, "w") as f:
+        f.write(NODE_ID)
+except Exception as e:
+    print(f"Warning: Could not save NODE_ID: {e}", flush=True)
+
+print(f"[DataNode] Started with NODE_ID: {NODE_ID}", flush=True)
+print(f"[DataNode] Storage directory: {STORAGE_DIR}", flush=True)
+
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "50051"))
 MULTICAST_GROUP = os.getenv("MULTICAST_GROUP", "224.0.0.1")
