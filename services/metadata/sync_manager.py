@@ -2,6 +2,7 @@ import socket
 import grpc
 import logging
 import threading
+import random
 import protos.service_pb2 as pb2
 import protos.service_pb2_grpc as pb2_grpc
 
@@ -61,3 +62,33 @@ class SyncManager:
             channel.close()
         except Exception as e:
             logger.debug(f"No se pudo sincronizar con {ip}: {e}")
+
+    def request_pull_sync(self):
+        """Elige un vecino al azar y le pide su base de datos completa"""
+        peers = self.get_peer_ips()
+        if not peers:
+            return None
+        
+        target_ip = random.choice(peers)
+        try:
+            channel = grpc.insecure_channel(f"{target_ip}:{self.port}")
+            stub = pb2_grpc.MetadataServiceStub(channel)
+            # Según tu .proto: GossipPull(GossipRequest) returns (GossipUpdate)
+            request = pb2.GossipRequest(requester_id=int(hash(self.node_id) % 10**8))
+            response = stub.GossipPull(request, timeout=5)
+            channel.close()
+            return response
+        except Exception as e:
+            logger.warning(f"Fallo al realizar Gossip Pull contra {target_ip}: {e}")
+            return None
+
+    def periodic_sync_loop(self, metadata_service_instance):
+        """Hilo que ejecuta el pull periódicamente (Anti-Entropy)"""
+        import time
+        logger.info("Iniciando bucle de Anti-Entropy (Periodic Pull)...")
+        while True:
+            # Sincronizar cada 30-60 segundos para evitar saturar la red
+            time.sleep(random.randint(30, 60))
+            response = self.request_pull_sync()
+            if response:
+                metadata_service_instance.process_gossip_update(response)        

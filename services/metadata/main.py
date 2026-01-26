@@ -213,11 +213,35 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
         
         return pb2.CommitResponse(success=True)
 
-    def GossipPush(self, request, context):
+    def GossipPull(self, request, context):
+            """Servidor: Entrega toda la DB local al solicitante"""
+            logger.info(f"Recibida solicitud GossipPull del nodo {request.requester_id}")
+            
+            entries = []
+            with metadata_lock:
+                for fid, meta in files_metadata.items():
+                    entries.append(pb2.FileMetadataEntry(
+                        file_id=fid,
+                        filename=meta['filename'],
+                        tags=meta['tags'],
+                        owner=meta['owner_id'],
+                        size=meta['size'],
+                        replicas=meta['replicas'],
+                        created_at=meta['created_at'],
+                        lamport_time=meta.get('lamport_time', 0)
+                    ))
+            
+            return pb2.GossipUpdate(
+                sender_id=int(hash(node_id) % 10**8),
+                sender_lamport_time=current_lamport_time,
+                files=entries
+            )
+
+    def process_gossip_update(self, update):
+        """Procesa una actualización (sea por Push o por Pull)"""
         global current_lamport_time
-        
         incoming_data = {}
-        for f in request.files:
+        for f in update.files:
             incoming_data[f.file_id] = {
                 "filename": f.filename,
                 "size": f.size,
@@ -226,14 +250,15 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
                 "replicas": list(f.replicas),
                 "created_at": f.created_at,
                 "lamport_time": f.lamport_time,
-                "is_deleted": False
+                "is_deleted": False # En una versión pro, aquí manejarías el campo is_deleted si estuviera en el .proto
             }
-            # Sincronizar el reloj Lamport global (Max + 1)
             current_lamport_time = max(current_lamport_time, f.lamport_time)
         
-        # Intentar persistir (la función save_state_locked filtrará si ya es viejo)
         save_state_locked(incoming_files=incoming_data)
-        
+
+    def GossipPush(self, request, context):
+        """Reutiliza la lógica de procesamiento común"""
+        self.process_gossip_update(request)
         return pb2.GossipAck(ok=True, receiver_lamport_time=current_lamport_time)
     
     def LocateFile(self, request, context):
@@ -361,14 +386,30 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
 
 def serve():
     load_state()
+    service_instance = MetadataService() 
+    
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    pb2_grpc.add_MetadataServiceServicer_to_server(MetadataService(), server)
+    pb2_grpc.add_MetadataServiceServicer_to_server(service_instance, server)
     server.add_insecure_port(f"[::]:{PORT}")
 
+    # 1. Hilos iniciales
     threading.Thread(target=heartbeat_listener, daemon=True).start()
     threading.Thread(target=node_monitor, daemon=True).start()
 
-    logger.info(f"Metadata AP Service iniciado en puerto {PORT}")
+    # 2. Hilo de Sincronización Periódica
+    threading.Thread(target=sync_manager.periodic_sync_loop, args=(service_instance,), daemon=True).start()
+
+    # 3.Intentar un Pull inicial inmediatamente al arrancar
+    def initial_sync():
+        time.sleep(5) # Esperar a que otros nodos estén listos
+        logger.info("Ejecutando sincronización inicial (Cold Start)...")
+        resp = sync_manager.request_pull_sync()
+        if resp:
+            service_instance.process_gossip_update(resp)
+
+    threading.Thread(target=initial_sync, daemon=True).start()
+
+    logger.info(f"Metadata Service iniciado con Gossip Pull/Push en {PORT}")
     server.start()
     server.wait_for_termination()
 
