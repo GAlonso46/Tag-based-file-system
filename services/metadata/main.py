@@ -382,7 +382,110 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
         
         logger.info(f"Tags actualizados y propagados para {fid}: {new_tags} (v.{current_lamport_time})")
         return pb2.TagResponse(success=True, current_tags=new_tags)
+
+# ================= AUTO-HEALING (RE-REPLICACIÓN) =================
+
+def replication_loop(service_instance):
+    """
+    Escanea periódicamente archivos con menos copias de las necesarias (N=2)
+    y ordena a otros nodos que hagan copias.
+    """
+    logger.info("Iniciando monitor de auto-sanación (Replication Monitor)...")
     
+    while True:
+        time.sleep(10) # Revisar cada 10 segundos
+        
+        # 1. Identificar trabajos de reparación (Solo lectura bajo lock)
+        jobs = []
+        
+        with metadata_lock:
+            # Copiamos las claves para evitar error "dict changed size during iteration"
+            all_files = list(files_metadata.items())
+        
+        # Analizamos sin bloquear todo el tiempo
+        for fid, meta in all_files:
+            if meta.get("is_deleted", False):
+                continue
+            
+            # Verificar quiénes siguen vivos
+            current_replicas = meta.get("replicas", [])
+            alive_replicas = []
+            
+            with active_nodes_lock:
+                known_nodes = list(active_nodes.keys()) # Snapshot de nodos vivos
+                node_data_snapshot = active_nodes.copy()
+            
+            for r_node in current_replicas:
+                if r_node in known_nodes:
+                    alive_replicas.append(r_node)
+            
+            # CRITERIO DE REPARACIÓN:
+            # Si hay menos de N copias, PERO al menos queda 1 viva (si hay 0, se perdió el archivo)
+            if 0 < len(alive_replicas) < REPLICATION_FACTOR:
+                # Buscar candidato: un nodo vivo que NO tenga el archivo
+                candidates = [n for n in known_nodes if n not in current_replicas]
+                
+                if candidates:
+                    target_node = random.choice(candidates)
+                    source_node = random.choice(alive_replicas)
+                    
+                    # Guardamos el trabajo para hacerlo fuera de los locks principales
+                    jobs.append({
+                        "file_id": fid,
+                        "target": target_node,
+                        "source": source_node,
+                        "target_info": node_data_snapshot[target_node],
+                        "source_info": node_data_snapshot[source_node]
+                    })
+
+        # 2. Ejecutar reparaciones (Network I/O - Lento)
+        for job in jobs:
+            fid = job['file_id']
+            tgt_id = job['target']
+            src_id = job['source']
+            tgt_info = job['target_info']
+            src_info = job['source_info']
+            
+            logger.info(f"Detectada baja redundancia en {fid}. Replicando {src_id} -> {tgt_id}")
+            
+            try:
+                # Conectar al TARGET y decirle "Copia desde SOURCE"
+                channel = grpc.insecure_channel(f"{tgt_info['address']}:{tgt_info['port']}")
+                stub = pb2_grpc.DataNodeServiceStub(channel)
+                
+                # Construir mensaje con info del source
+                req = pb2.ReplicateRequest(
+                    file_id=fid,
+                    source_node=pb2.NodeInfo(
+                        node_id=src_id,
+                        address=src_info['address'],
+                        port=src_info['port']
+                    )
+                )
+                
+                resp = stub.ReplicateFrom(req, timeout=10)
+                channel.close()
+                
+                if resp.success:
+                    logger.info(f"Reparación exitosa para {fid} en nodo {tgt_id}")
+                    
+                    # 3. Actualizar Metadata (Consistencia Eventual)
+                    global current_lamport_time
+                    with metadata_lock:
+                        if fid in files_metadata:
+                            files_metadata[fid]["replicas"].append(tgt_id)
+                            current_lamport_time += 1
+                            files_metadata[fid]["lamport_time"] = current_lamport_time
+                            updated_meta = files_metadata[fid]
+                            
+                            save_state_locked()
+                            
+                            # Importante: Avisar a los demás Metadatas que ahora hay una nueva copia
+                            sync_manager.broadcast_update(fid, updated_meta)
+            
+            except Exception as e:
+                logger.error(f"Fallo al intentar reparar {fid}: {e}")
+
 # ================= ARRANQUE =================
 
 def serve():
@@ -399,8 +502,11 @@ def serve():
 
     # 2. Hilo de Sincronización Periódica
     threading.Thread(target=sync_manager.periodic_sync_loop, args=(service_instance,), daemon=True).start()
+    
+    # 3. Hilo de Auto-Healing
+    threading.Thread(target=replication_loop, args=(service_instance,), daemon=True).start()
 
-    # 3.Intentar un Pull inicial inmediatamente al arrancar
+    # 4.Intentar un Pull inicial inmediatamente al arrancar
     def initial_sync():
         time.sleep(5) # Esperar a que otros nodos estén listos
         logger.info("Ejecutando sincronización inicial (Cold Start)...")
