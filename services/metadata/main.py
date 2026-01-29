@@ -44,6 +44,9 @@ current_lamport_time = 0
 node_id = socket.gethostname() # Usado como ID único
 sync_manager = SyncManager(node_id=node_id)
 
+# Tiempo en que el contenedor de Metadata inició (en segundos)
+METADATA_START_TIME = time.time()
+
 # ================= PERSISTENCIA =================
 
 def load_state():
@@ -512,17 +515,30 @@ def reconcile_node_files(node_id, node_ip, node_port, reported_files):
     # Convertimos la lista del reporte a un Set para búsqueda rápida
     reported_set = set(reported_files)
     
-    # 1. Detectar Archivos Fantasmas (El nodo lo tiene, pero no debería)
-    #    Recorremos los archivos reportados y verificamos en Metadata
     files_to_delete_physically = []
+
+    # Tiempo que lleva vivo este Metadata
+    uptime_seconds = time.time() - METADATA_START_TIME
+    # Definimos periodo de gracia
+    GRACE_PERIOD = 180
     
     with metadata_lock:
         for fid in reported_files:
             if fid == "": continue # Ignorar strings vacíos
             
-            # Si el archivo NO existe en metadata O está marcado como borrado
+            # El archivo existe en DB pero está marcado como eliminado.
             if (fid in files_metadata) and (files_metadata[fid].get("is_deleted", False)):
                 files_to_delete_physically.append(fid)
+
+            # El archivo NO existe en nuestra DB.
+            elif fid not in files_metadata:
+                # Solo borramos si ya pasó el periodo de gracia de sincronización inicial
+                if uptime_seconds > GRACE_PERIOD:
+                    logger.info(f"Limpieza de archivo huérfano: {fid} no existe en DB tras uptime de {int(uptime_seconds)}s.")
+                    files_to_delete_physically.append(fid)
+                else:
+                    # Estamos en periodo de gracia, ignoramos para evitar falsos positivos
+                    pass    
 
     # Ejecutar borrado físico (RPC hacia el DataNode)
     if files_to_delete_physically:
