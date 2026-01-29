@@ -220,40 +220,46 @@ def get_container_ip():
         return "127.0.0.1"
 
 def heartbeat_sender():
-    """Sends UDP packets to announce presence to all metadata nodes"""
+    """
+    Envía paquetes UDP para anunciar presencia e INVENTARIO de archivos.
+    Formato del mensaje: "NODE_ID|IP|PORT|LOAD|FILE_ID_1,FILE_ID_2,..."
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    
-    # Get our container IP
     container_ip = get_container_ip()
-    print(f"[{NODE_ID}] Container IP: {container_ip}", flush=True)
-    print(f"[{NODE_ID}] Sending heartbeats to metadata service (port {MULTICAST_PORT})", flush=True)
+    logger_print = True # Para no llenar el log, solo imprimimos la primera vez
+
+    print(f"[{NODE_ID}] Iniciando Heartbeat + Block Report hacia puerto {MULTICAST_PORT}", flush=True)
     
     while True:
         try:
-            # Docker Swarm: Resolve tasks.metadata to get all metadata IPs
+            # 1. Obtener IPs de Metadata (Lógica existente)
             try:
                 metadata_ips = socket.gethostbyname_ex("tasks.metadata")[2]
             except socket.gaierror:
-                # Fallback: try the service name directly
                 try:
                     metadata_ips = [socket.gethostbyname("metadata")]
                 except:
                     metadata_ips = []
             
             if metadata_ips:
-                # Message format: "NODE_ID|IP|PORT|LOAD"
-                msg = f"{NODE_ID}|{container_ip}|{PORT}|0".encode('utf-8')
+                # 2. GENERAR REPORTE DE BLOQUES (NUEVO)
+                # Escaneamos qué archivos tenemos realmente en disco
+                files_on_disk = [f.name for f in STORAGE_DIR.iterdir() if f.is_file() and not f.name.endswith('.tmp') and f.name != "node_id"]
+                files_list_str = ",".join(files_on_disk)
+
+                # 3. Construir mensaje extendido
+                # Añadimos la lista de archivos al final
+                msg = f"{NODE_ID}|{container_ip}|{PORT}|0|{files_list_str}".encode('utf-8')
                 
-                # Send to each metadata replica
                 for metadata_ip in metadata_ips:
                     try:
                         sock.sendto(msg, (metadata_ip, MULTICAST_PORT))
-                    except Exception as e:
-                        pass  # Silently ignore individual send failures
+                    except Exception:
+                        pass
                 
-                if len(metadata_ips) > 1:
-                    # Only log first time we discover multiple metadata nodes
-                    pass
+                if logger_print and len(metadata_ips) > 0:
+                    print(f"[{NODE_ID}] Reportando {len(files_on_disk)} archivos a {metadata_ips}", flush=True)
+                    logger_print = False # Dejar de spammear logs
             
             time.sleep(5)
         except Exception as e:

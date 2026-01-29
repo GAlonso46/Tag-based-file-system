@@ -115,21 +115,40 @@ MULTICAST_PORT = 5000
 def heartbeat_listener():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("", MULTICAST_PORT))
-    logger.info(f"Escuchando Heartbeats en puerto {MULTICAST_PORT}")
+    logger.info(f"Escuchando Heartbeats + Reportes en puerto {MULTICAST_PORT}")
 
     while True:
         try:
-            data, _ = sock.recvfrom(1024)
+            data, _ = sock.recvfrom(4096) # Aumentamos buffer por seguridad
             msg = data.decode().strip()
             parts = msg.split("|")
+            
             if len(parts) >= 3:
-                node_id, ip, port = parts[0], parts[1], int(parts[2])
+                # Formato básico: ID|IP|PORT|LOAD
+                n_id, ip, port = parts[0], parts[1], int(parts[2])
+                
+                # Actualizar estado "VIVO"
                 with active_nodes_lock:
-                    active_nodes[node_id] = {
+                    active_nodes[n_id] = {
                         "address": ip, 
                         "port": port, 
                         "last_seen": time.time()
                     }
+                
+                # Formato Extendido: ID|IP|PORT|LOAD|FILE1,FILE2...
+                if len(parts) >= 5:
+                    files_str = parts[4]
+                    # Si viene vacío (ej: "file1,,file2"), filter limpia
+                    reported_files = [f for f in files_str.split(",") if f]
+                    
+                    # Llamamos a la reconciliación en un hilo aparte para no bloquear el listener UDP
+                    # (Importante para no perder paquetes de otros nodos)
+                    threading.Thread(
+                        target=reconcile_node_files,
+                        args=(n_id, ip, port, reported_files),
+                        daemon=True
+                    ).start()
+
         except Exception as e:
             logger.error(f"Error en heartbeat: {e}")
 
@@ -485,6 +504,59 @@ def replication_loop(service_instance):
             
             except Exception as e:
                 logger.error(f"Fallo al intentar reparar {fid}: {e}")
+
+def reconcile_node_files(node_id, node_ip, node_port, reported_files):
+    """
+    Compara lo que el DataNode dice tener vs lo que el Metadata cree que tiene.
+    """
+    # Convertimos la lista del reporte a un Set para búsqueda rápida
+    reported_set = set(reported_files)
+    
+    # 1. Detectar Archivos Fantasmas (El nodo lo tiene, pero no debería)
+    #    Recorremos los archivos reportados y verificamos en Metadata
+    files_to_delete_physically = []
+    
+    with metadata_lock:
+        for fid in reported_files:
+            if fid == "": continue # Ignorar strings vacíos
+            
+            # Si el archivo NO existe en metadata O está marcado como borrado
+            if (fid in files_metadata) and (files_metadata[fid].get("is_deleted", False)):
+                files_to_delete_physically.append(fid)
+
+    # Ejecutar borrado físico (RPC hacia el DataNode)
+    if files_to_delete_physically:
+        logger.warning(f"Detectados {len(files_to_delete_physically)} archivos fantasmas en {node_id}. Ordenando eliminación...")
+        try:
+            channel = grpc.insecure_channel(f"{node_ip}:{node_port}")
+            stub = pb2_grpc.DataNodeServiceStub(channel)
+            for fid in files_to_delete_physically:
+                try:
+                    stub.DeleteFile(pb2.FileRequest(file_id=fid), timeout=1)
+                except Exception as e:
+                    logger.error(f"Error borrando fantasma {fid} en {node_id}: {e}")
+            channel.close()
+        except Exception as e:
+            logger.error(f"No se pudo conectar a {node_id} para limpieza: {e}")
+
+    # 2. Detectar Archivos Perdidos (Metadata cree que está, pero el nodo NO lo reportó)
+    #    Recorremos TODA la metadata buscando referencias a este nodo
+    #    (Esta operación puede ser pesada si hay millones de archivos, para <100 es instantánea)
+    
+    with metadata_lock:
+        for fid, meta in files_metadata.items():
+            if meta.get("is_deleted", False):
+                continue
+            
+            # Si el nodo está en la lista de réplicas...
+            if node_id in meta["replicas"]:
+                # ...pero NO reportó tener el archivo
+                if fid not in reported_set:
+                    logger.warning(f"Inconsistencia: {node_id} perdió el archivo {fid}. Actualizando registro.")
+                    # Lo sacamos de la lista de réplicas
+                    meta["replicas"].remove(node_id)
+                    # Al sacarlo, el 'replication_loop' detectará automáticamente 
+                    # que faltan copias y creará una nueva en otro nodo.                
 
 # ================= ARRANQUE =================
 
