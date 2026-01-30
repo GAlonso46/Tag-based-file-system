@@ -430,24 +430,17 @@ def discover_datanode_ips():
 
 def replication_loop(service_instance):
     """
-    Auto-healing con descubrimiento dinámico de DataNodes.
+    Auto-healing basado en Heartbeats.
+    Replica archivos que tengan menos copias que REPLICATION_FACTOR.
     """
+
     logger.info("Iniciando monitor de auto-sanación (Replication Monitor)...")
 
     while True:
         time.sleep(10)
 
         # ==============================
-        # 1. Descubrir DataNodes reales
-        # ==============================
-        datanode_ips = discover_datanode_ips()
-
-        if not datanode_ips:
-            logger.warning("No se encontraron DataNodes vía DNS. Reintentando luego...")
-            continue
-
-        # ==============================
-        # 2. Snapshot consistente
+        # 1. Snapshot consistente
         # ==============================
         with metadata_lock:
             all_files = list(files_metadata.items())
@@ -455,10 +448,14 @@ def replication_loop(service_instance):
         with active_nodes_lock:
             active_snapshot = active_nodes.copy()
 
+        if not active_snapshot:
+            logger.warning("No hay DataNodes activos según heartbeats. Reintentando luego...")
+            continue
+
         jobs = []
 
         # ==============================
-        # 3. Analizar archivos
+        # 2. Analizar archivos
         # ==============================
         for fid, meta in all_files:
 
@@ -467,7 +464,7 @@ def replication_loop(service_instance):
 
             current_replicas = meta.get("replicas", [])
 
-            # Réplicas que están vivas según heartbeats
+            # Réplicas que están vivas
             alive_replicas = [
                 n for n in current_replicas
                 if n in active_snapshot
@@ -477,21 +474,18 @@ def replication_loop(service_instance):
             if not alive_replicas:
                 continue
 
+            # Ya cumple el factor
             if len(alive_replicas) >= REPLICATION_FACTOR:
                 continue
 
             # ==============================
-            # 4. Seleccionar candidatos válidos
+            # 3. Seleccionar candidatos
             # ==============================
-            candidates = []
-
-            for node_id, info in active_snapshot.items():
-
-                # Nodo debe:
-                # 1) Estar en DNS
-                # 2) No tener ya el archivo
-                if info["address"] in datanode_ips and node_id not in current_replicas:
-                    candidates.append(node_id)
+            candidates = [
+                node_id
+                for node_id in active_snapshot.keys()
+                if node_id not in current_replicas
+            ]
 
             if not candidates:
                 continue
@@ -508,7 +502,7 @@ def replication_loop(service_instance):
             })
 
         # ==============================
-        # 5. Ejecutar reparaciones
+        # 4. Ejecutar reparaciones
         # ==============================
         for job in jobs:
 
