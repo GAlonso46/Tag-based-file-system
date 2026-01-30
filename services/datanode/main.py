@@ -222,49 +222,70 @@ def get_container_ip():
 def heartbeat_sender():
     """
     Envía paquetes UDP para anunciar presencia e INVENTARIO de archivos.
-    Formato del mensaje: "NODE_ID|IP|PORT|LOAD|FILE_ID_1,FILE_ID_2,..."
-    """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    container_ip = get_container_ip()
-    logger_print = True # Para no llenar el log, solo imprimimos la primera vez
+    Descubre dinámicamente todos los Metadata mediante DNS alias.
 
-    print(f"[{NODE_ID}] Iniciando Heartbeat + Block Report hacia puerto {MULTICAST_PORT}", flush=True)
-    
+    Formato del mensaje:
+    NODE_ID|IP|PORT|LOAD|FILE_ID_1,FILE_ID_2,...
+    """
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    container_ip = get_container_ip()
+
+    print(f"[{NODE_ID}] Heartbeat dinámico usando alias 'metadata_service'", flush=True)
+
     while True:
         try:
-            # 1. Obtener IPs de Metadata (Lógica existente)
-            try:
-                metadata_ips = socket.gethostbyname_ex("tasks.metadata")[2]
-            except socket.gaierror:
-                try:
-                    metadata_ips = [socket.gethostbyname("metadata")]
-                except:
-                    metadata_ips = []
-            
-            if metadata_ips:
-                # 2. GENERAR REPORTE DE BLOQUES (NUEVO)
-                # Escaneamos qué archivos tenemos realmente en disco
-                files_on_disk = [f.name for f in STORAGE_DIR.iterdir() if f.is_file() and not f.name.endswith('.tmp') and f.name != "node_id"]
-                files_list_str = ",".join(files_on_disk)
+            # 1. Resolver alias de metadata a múltiples IPs
+            metadata_ips = set()
 
-                # 3. Construir mensaje extendido
-                # Añadimos la lista de archivos al final
-                msg = f"{NODE_ID}|{container_ip}|{PORT}|0|{files_list_str}".encode('utf-8')
-                
-                for metadata_ip in metadata_ips:
-                    try:
-                        sock.sendto(msg, (metadata_ip, MULTICAST_PORT))
-                    except Exception:
-                        pass
-                
-                if logger_print and len(metadata_ips) > 0:
-                    print(f"[{NODE_ID}] Reportando {len(files_on_disk)} archivos a {metadata_ips}", flush=True)
-                    logger_print = False # Dejar de spammear logs
-            
+            try:
+                results = socket.getaddrinfo(
+                    "metadata_service",
+                    None,
+                    family=socket.AF_INET,
+                    type=socket.SOCK_DGRAM
+                )
+
+                for entry in results:
+                    ip = entry[4][0]
+                    metadata_ips.add(ip)
+
+            except socket.gaierror as e:
+                print(f"[{NODE_ID}] DNS lookup failed for metadata_service: {e}", flush=True)
+
+            if not metadata_ips:
+                time.sleep(5)
+                continue
+
+            # 2. Construir inventario de archivos locales
+            files_on_disk = [
+                f.name
+                for f in STORAGE_DIR.iterdir()
+                if f.is_file()
+                and not f.name.endswith(".tmp")
+                and f.name != "node_id"
+            ]
+
+            files_list_str = ",".join(files_on_disk)
+
+            # 3. Construir mensaje heartbeat
+            msg = f"{NODE_ID}|{container_ip}|{PORT}|0|{files_list_str}"
+            payload = msg.encode("utf-8")
+
+            # 4. Enviar a cada Metadata encontrado
+            for ip in metadata_ips:
+                try:
+                    sock.sendto(payload, (ip, MULTICAST_PORT))
+                except Exception:
+                    # Metadata puede estar arrancando o caído → ignorar
+                    pass
+
             time.sleep(5)
+
         except Exception as e:
             print(f"[{NODE_ID}] Heartbeat error: {e}", flush=True)
             time.sleep(5)
+
 
 def serve():
     # Configure gRPC with larger message limits (critical for large files)
