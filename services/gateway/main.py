@@ -49,6 +49,9 @@ def startup():
 
 # gRPC Clients - no longer maintaining persistent connections
 
+# Global ThreadPoolExecutor for parallel uploads (prevents thread exhaustion)
+UPLOAD_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=32)
+
 def get_grpc_credentials():
     """Get gRPC credentials (TLS or insecure)"""
     if not ENABLE_TLS:
@@ -96,40 +99,12 @@ def new_metadata_stub():
     
     return pb2_grpc.MetadataServiceStub(channel), channel
 
-def get_all_metadata_stubs():
-    """Get stubs for ALL metadata replicas using round-robin DNS queries"""
-    options = [
-        ('grpc.max_send_message_length', 100 * 1024 * 1024),
-        ('grpc.max_receive_message_length', 100 * 1024 * 1024),
-    ]
-    
-    # Expected number of metadata replicas
-    EXPECTED_REPLICAS = int(os.getenv("EXPECTED_METADATA_REPLICAS", "3"))
-    
-    stubs = []
-    credentials = get_grpc_credentials()
-    
-    # Create multiple connections - Docker DNS will round-robin to different IPs
-    for i in range(EXPECTED_REPLICAS):
-        try:
-            if credentials:
-                channel = grpc.secure_channel(f'{METADATA_HOST}:{METADATA_PORT}', credentials, options=options)
-            else:
-                channel = grpc.insecure_channel(f'{METADATA_HOST}:{METADATA_PORT}', options=options)
-            stub = pb2_grpc.MetadataServiceStub(channel)
-            stubs.append(stub)
-        except Exception as e:
-            print(f"[Gateway] Failed to connect to metadata replica {i+1}: {e}", flush=True)
-    
-    print(f"[Gateway] Created {len(stubs)} metadata connections (expecting {EXPECTED_REPLICAS})", flush=True)
-    if not stubs:
-        stub, channel = new_metadata_stub()
-        return [(stub, channel)]
-    return stubs
 
 
 
-def get_datanode_stub(host, port):
+
+def new_datanode_stub(host, port):
+    """Create ephemeral datanode stub with channel for cleanup"""
     options = [
         ('grpc.max_send_message_length', 100 * 1024 * 1024),
         ('grpc.max_receive_message_length', 100 * 1024 * 1024),
@@ -141,7 +116,7 @@ def get_datanode_stub(host, port):
     else:
         channel = grpc.insecure_channel(f'{host}:{port}', options=options)
     
-    return pb2_grpc.DataNodeServiceStub(channel)
+    return pb2_grpc.DataNodeServiceStub(channel), channel
 
 # Generators
 def chunk_generator(file_id, content):
@@ -203,14 +178,13 @@ async def upload_file(
 
         success_nodes = []
 
-        loop = asyncio.get_event_loop()
-        executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(target_nodes)
-        )
+        loop = asyncio.get_running_loop()
+        executor = UPLOAD_EXECUTOR
 
         def upload_to_node(node):
+            channel = None
             try:
-                ds = get_datanode_stub(node.address, node.port)
+                ds, channel = new_datanode_stub(node.address, node.port)
                 resp = ds.StoreChunk(
                     chunk_generator(file_id, content),
                     timeout=60
@@ -219,6 +193,9 @@ async def upload_file(
                     return node.node_id
             except:
                 pass
+            finally:
+                if channel:
+                    channel.close()
             return None
 
         tasks = [
@@ -283,8 +260,9 @@ async def download_file(
 
     # Try replicas one by one
     for node in loc.replica_nodes:
+        channel = None
         try:
-            ds = get_datanode_stub(node.address, node.port)
+            ds, channel = new_datanode_stub(node.address, node.port)
             ds.Ping(pb2.PingRequest(), timeout=2)
 
             chunks_iter = ds.RetrieveChunk(
@@ -306,6 +284,8 @@ async def download_file(
             )
 
         except Exception as e:
+            if channel:
+                channel.close()
             print(
                 f"[Gateway] Replica {node.node_id} failed: {e}",
                 flush=True

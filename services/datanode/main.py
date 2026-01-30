@@ -170,45 +170,63 @@ class DataNode(pb2_grpc.DataNodeServiceServicer):
         source_addr = request.source_node_address
         source_port = request.source_node_port
 
-        print(f"[{NODE_ID}] Iniciando replicación de {file_id} desde {source_addr}:{source_port}", flush=True)
+        print(f"[{NODE_ID}] 🔄 Iniciando replicación de {file_id} desde {source_addr}:{source_port}", flush=True)
 
         temp_path = STORAGE_DIR / f"{file_id}_repl_{uuid.uuid4()}.tmp"
         final_path = STORAGE_DIR / file_id
 
         if final_path.exists():
+            print(f"[{NODE_ID}] ⚠️  Archivo {file_id} ya existe localmente, omitiendo replicación", flush=True)
             return pb2.ReplicationResponse(success=True, message="Archivo ya existe localmente")
 
         channel = None
         try:
             # 1. Conectarse al nodo origen
-            # Nota: Usamos insecure channel internamente entre contenedores
+            print(f"[{NODE_ID}] 📡 Conectando a nodo origen {source_addr}:{source_port}...", flush=True)
             channel = grpc.insecure_channel(f"{source_addr}:{source_port}")
             stub = pb2_grpc.DataNodeServiceStub(channel)
 
             # 2. Solicitar el archivo (Stream)
+            print(f"[{NODE_ID}] 📥 Solicitando chunks de {file_id}...", flush=True)
             chunk_iterator = stub.RetrieveChunk(pb2.FileRequest(file_id=file_id))
 
             # 3. Guardar en disco (Stream to File)
             bytes_written = 0
+            chunks_received = 0
             with open(temp_path, "wb") as f:
                 for chunk in chunk_iterator:
                     f.write(chunk.content)
                     bytes_written += len(chunk.content)
+                    chunks_received += 1
+                    
+                    # Log cada 10 chunks para no saturar
+                    if chunks_received % 10 == 0:
+                        print(f"[{NODE_ID}] 📦 Recibidos {chunks_received} chunks ({bytes_written} bytes)...", flush=True)
             
             # 4. Finalizar
             temp_path.rename(final_path)
-            print(f"[{NODE_ID}] Replicación exitosa: {file_id} ({bytes_written} bytes)", flush=True)
+            print(f"[{NODE_ID}] ✅ Replicación exitosa: {file_id}", flush=True)
+            print(f"[{NODE_ID}]    └─ Total: {chunks_received} chunks, {bytes_written} bytes", flush=True)
             return pb2.ReplicationResponse(success=True, message="Replicación completada")
 
+        except grpc.RpcError as e:
+            if temp_path.exists():
+                os.remove(temp_path)
+            error_msg = f"Error gRPC replicando desde {source_addr}: {e.code()} - {e.details()}"
+            print(f"[{NODE_ID}] ❌ {error_msg}", flush=True)
+            return pb2.ReplicationResponse(success=False, message=error_msg)
         except Exception as e:
             if temp_path.exists():
                 os.remove(temp_path)
             error_msg = f"Error replicando desde {source_addr}: {e}"
-            print(f"[{NODE_ID}] {error_msg}", flush=True)
+            print(f"[{NODE_ID}] ❌ {error_msg}", flush=True)
+            import traceback
+            traceback.print_exc()
             return pb2.ReplicationResponse(success=False, message=error_msg)
         finally:
             if channel:
-                channel.close()    
+                channel.close()
+                print(f"[{NODE_ID}] 🔌 Canal gRPC cerrado con {source_addr}:{source_port}", flush=True)    
 
 def get_container_ip():
     """Get the container's IP address in the overlay network"""
