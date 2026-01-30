@@ -29,6 +29,11 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 FILES_DB = DATA_DIR / "files_shared.json"
 
+# Garantizar existencia del archivo
+if not FILES_DB.exists():
+    with open(FILES_DB, "w") as f:
+        json.dump({}, f)
+
 # N=3 en la teoría, pero el código se adapta a los que encuentre
 REPLICATION_FACTOR = 2 
 
@@ -521,13 +526,10 @@ def replication_loop(service_instance):
 
                 stub = pb2_grpc.DataNodeServiceStub(channel)
 
-                req = pb2.ReplicateRequest(
+                req = pb2.ReplicationRequest(
                     file_id=fid,
-                    source_node=pb2.NodeInfo(
-                        node_id=src_id,
-                        address=src_info["address"],
-                        port=src_info["port"]
-                    )
+                    source_node_address=src_info["address"],
+                    source_node_port=src_info["port"]
                 )
 
                 resp = stub.ReplicateFrom(req, timeout=10)

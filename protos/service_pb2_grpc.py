@@ -57,6 +57,11 @@ class DataNodeServiceStub(object):
                 request_serializer=protos_dot_service__pb2.FileRequest.SerializeToString,
                 response_deserializer=protos_dot_service__pb2.DeleteResponse.FromString,
                 _registered_method=True)
+        self.ReplicateFrom = channel.unary_unary(
+                '/tagfs.DataNodeService/ReplicateFrom',
+                request_serializer=protos_dot_service__pb2.ReplicationRequest.SerializeToString,
+                response_deserializer=protos_dot_service__pb2.ReplicationResponse.FromString,
+                _registered_method=True)
 
 
 class DataNodeServiceServicer(object):
@@ -93,6 +98,13 @@ class DataNodeServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ReplicateFrom(self, request, context):
+        """Replicate file from source to target DataNode (for re-replication)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_DataNodeServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -115,6 +127,11 @@ def add_DataNodeServiceServicer_to_server(servicer, server):
                     servicer.DeleteFile,
                     request_deserializer=protos_dot_service__pb2.FileRequest.FromString,
                     response_serializer=protos_dot_service__pb2.DeleteResponse.SerializeToString,
+            ),
+            'ReplicateFrom': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReplicateFrom,
+                    request_deserializer=protos_dot_service__pb2.ReplicationRequest.FromString,
+                    response_serializer=protos_dot_service__pb2.ReplicationResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -238,6 +255,33 @@ class DataNodeService(object):
             metadata,
             _registered_method=True)
 
+    @staticmethod
+    def ReplicateFrom(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/tagfs.DataNodeService/ReplicateFrom',
+            protos_dot_service__pb2.ReplicationRequest.SerializeToString,
+            protos_dot_service__pb2.ReplicationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
 
 class MetadataServiceStub(object):
     """==================== METADATA SERVICE ====================
@@ -276,10 +320,55 @@ class MetadataServiceStub(object):
                 request_serializer=protos_dot_service__pb2.TagRequest.SerializeToString,
                 response_deserializer=protos_dot_service__pb2.TagResponse.FromString,
                 _registered_method=True)
+        self.UpdateTags = channel.unary_unary(
+                '/tagfs.MetadataService/UpdateTags',
+                request_serializer=protos_dot_service__pb2.UpdateTagsRequest.SerializeToString,
+                response_deserializer=protos_dot_service__pb2.TagResponse.FromString,
+                _registered_method=True)
         self.ListFiles = channel.unary_unary(
                 '/tagfs.MetadataService/ListFiles',
                 request_serializer=protos_dot_service__pb2.ListRequest.SerializeToString,
                 response_deserializer=protos_dot_service__pb2.ListResponse.FromString,
+                _registered_method=True)
+        self.DeleteFile = channel.unary_unary(
+                '/tagfs.MetadataService/DeleteFile',
+                request_serializer=protos_dot_service__pb2.FileRequest.SerializeToString,
+                response_deserializer=protos_dot_service__pb2.DeleteResponse.FromString,
+                _registered_method=True)
+        self.Election = channel.unary_unary(
+                '/tagfs.MetadataService/Election',
+                request_serializer=protos_dot_service__pb2.ElectionRequest.SerializeToString,
+                response_deserializer=protos_dot_service__pb2.ElectionResponse.FromString,
+                _registered_method=True)
+        self.Coordinator = channel.unary_unary(
+                '/tagfs.MetadataService/Coordinator',
+                request_serializer=protos_dot_service__pb2.CoordinatorRequest.SerializeToString,
+                response_deserializer=protos_dot_service__pb2.CoordinatorResponse.FromString,
+                _registered_method=True)
+        self.LeaderHeartbeat = channel.unary_unary(
+                '/tagfs.MetadataService/LeaderHeartbeat',
+                request_serializer=protos_dot_service__pb2.HeartbeatRequest.SerializeToString,
+                response_deserializer=protos_dot_service__pb2.HeartbeatResponse.FromString,
+                _registered_method=True)
+        self.GossipPush = channel.unary_unary(
+                '/tagfs.MetadataService/GossipPush',
+                request_serializer=protos_dot_service__pb2.GossipUpdate.SerializeToString,
+                response_deserializer=protos_dot_service__pb2.GossipAck.FromString,
+                _registered_method=True)
+        self.GossipPull = channel.unary_unary(
+                '/tagfs.MetadataService/GossipPull',
+                request_serializer=protos_dot_service__pb2.GossipRequest.SerializeToString,
+                response_deserializer=protos_dot_service__pb2.GossipUpdate.FromString,
+                _registered_method=True)
+        self.CompareMerkleRoot = channel.unary_unary(
+                '/tagfs.MetadataService/CompareMerkleRoot',
+                request_serializer=protos_dot_service__pb2.MerkleRootRequest.SerializeToString,
+                response_deserializer=protos_dot_service__pb2.MerkleRootResponse.FromString,
+                _registered_method=True)
+        self.Ping = channel.unary_unary(
+                '/tagfs.MetadataService/Ping',
+                request_serializer=protos_dot_service__pb2.PingRequest.SerializeToString,
+                response_deserializer=protos_dot_service__pb2.PingResponse.FromString,
                 _registered_method=True)
 
 
@@ -324,8 +413,66 @@ class MetadataServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def UpdateTags(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def ListFiles(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteFile(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Election(self, request, context):
+        """Bully Algorithm RPCs for Leader Election
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Coordinator(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def LeaderHeartbeat(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GossipPush(self, request, context):
+        """Gossip Protocol RPCs for Metadata Propagation
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GossipPull(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CompareMerkleRoot(self, request, context):
+        """Merkle Tree Anti-Entropy
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Ping(self, request, context):
+        """Health Check for Peer Discovery
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -358,10 +505,55 @@ def add_MetadataServiceServicer_to_server(servicer, server):
                     request_deserializer=protos_dot_service__pb2.TagRequest.FromString,
                     response_serializer=protos_dot_service__pb2.TagResponse.SerializeToString,
             ),
+            'UpdateTags': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateTags,
+                    request_deserializer=protos_dot_service__pb2.UpdateTagsRequest.FromString,
+                    response_serializer=protos_dot_service__pb2.TagResponse.SerializeToString,
+            ),
             'ListFiles': grpc.unary_unary_rpc_method_handler(
                     servicer.ListFiles,
                     request_deserializer=protos_dot_service__pb2.ListRequest.FromString,
                     response_serializer=protos_dot_service__pb2.ListResponse.SerializeToString,
+            ),
+            'DeleteFile': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteFile,
+                    request_deserializer=protos_dot_service__pb2.FileRequest.FromString,
+                    response_serializer=protos_dot_service__pb2.DeleteResponse.SerializeToString,
+            ),
+            'Election': grpc.unary_unary_rpc_method_handler(
+                    servicer.Election,
+                    request_deserializer=protos_dot_service__pb2.ElectionRequest.FromString,
+                    response_serializer=protos_dot_service__pb2.ElectionResponse.SerializeToString,
+            ),
+            'Coordinator': grpc.unary_unary_rpc_method_handler(
+                    servicer.Coordinator,
+                    request_deserializer=protos_dot_service__pb2.CoordinatorRequest.FromString,
+                    response_serializer=protos_dot_service__pb2.CoordinatorResponse.SerializeToString,
+            ),
+            'LeaderHeartbeat': grpc.unary_unary_rpc_method_handler(
+                    servicer.LeaderHeartbeat,
+                    request_deserializer=protos_dot_service__pb2.HeartbeatRequest.FromString,
+                    response_serializer=protos_dot_service__pb2.HeartbeatResponse.SerializeToString,
+            ),
+            'GossipPush': grpc.unary_unary_rpc_method_handler(
+                    servicer.GossipPush,
+                    request_deserializer=protos_dot_service__pb2.GossipUpdate.FromString,
+                    response_serializer=protos_dot_service__pb2.GossipAck.SerializeToString,
+            ),
+            'GossipPull': grpc.unary_unary_rpc_method_handler(
+                    servicer.GossipPull,
+                    request_deserializer=protos_dot_service__pb2.GossipRequest.FromString,
+                    response_serializer=protos_dot_service__pb2.GossipUpdate.SerializeToString,
+            ),
+            'CompareMerkleRoot': grpc.unary_unary_rpc_method_handler(
+                    servicer.CompareMerkleRoot,
+                    request_deserializer=protos_dot_service__pb2.MerkleRootRequest.FromString,
+                    response_serializer=protos_dot_service__pb2.MerkleRootResponse.SerializeToString,
+            ),
+            'Ping': grpc.unary_unary_rpc_method_handler(
+                    servicer.Ping,
+                    request_deserializer=protos_dot_service__pb2.PingRequest.FromString,
+                    response_serializer=protos_dot_service__pb2.PingResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -513,6 +705,33 @@ class MetadataService(object):
             _registered_method=True)
 
     @staticmethod
+    def UpdateTags(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/tagfs.MetadataService/UpdateTags',
+            protos_dot_service__pb2.UpdateTagsRequest.SerializeToString,
+            protos_dot_service__pb2.TagResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def ListFiles(request,
             target,
             options=(),
@@ -529,6 +748,222 @@ class MetadataService(object):
             '/tagfs.MetadataService/ListFiles',
             protos_dot_service__pb2.ListRequest.SerializeToString,
             protos_dot_service__pb2.ListResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteFile(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/tagfs.MetadataService/DeleteFile',
+            protos_dot_service__pb2.FileRequest.SerializeToString,
+            protos_dot_service__pb2.DeleteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Election(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/tagfs.MetadataService/Election',
+            protos_dot_service__pb2.ElectionRequest.SerializeToString,
+            protos_dot_service__pb2.ElectionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Coordinator(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/tagfs.MetadataService/Coordinator',
+            protos_dot_service__pb2.CoordinatorRequest.SerializeToString,
+            protos_dot_service__pb2.CoordinatorResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def LeaderHeartbeat(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/tagfs.MetadataService/LeaderHeartbeat',
+            protos_dot_service__pb2.HeartbeatRequest.SerializeToString,
+            protos_dot_service__pb2.HeartbeatResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GossipPush(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/tagfs.MetadataService/GossipPush',
+            protos_dot_service__pb2.GossipUpdate.SerializeToString,
+            protos_dot_service__pb2.GossipAck.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GossipPull(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/tagfs.MetadataService/GossipPull',
+            protos_dot_service__pb2.GossipRequest.SerializeToString,
+            protos_dot_service__pb2.GossipUpdate.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CompareMerkleRoot(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/tagfs.MetadataService/CompareMerkleRoot',
+            protos_dot_service__pb2.MerkleRootRequest.SerializeToString,
+            protos_dot_service__pb2.MerkleRootResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Ping(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/tagfs.MetadataService/Ping',
+            protos_dot_service__pb2.PingRequest.SerializeToString,
+            protos_dot_service__pb2.PingResponse.FromString,
             options,
             channel_credentials,
             insecure,

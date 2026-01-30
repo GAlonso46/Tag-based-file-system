@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
+import { API_URL } from '../config';
 import './Auth.css';
 
 export const LoginPage = () => {
@@ -13,8 +14,6 @@ export const LoginPage = () => {
     const [loading, setLoading] = useState(false);
     const { login } = useAuth();
     const { showNotification } = useNotification();
-
-    const API_URL = 'http://localhost:8000';
 
     const handleChange = (e) => {
         setFormData({

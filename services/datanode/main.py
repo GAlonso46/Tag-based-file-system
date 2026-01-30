@@ -167,20 +167,22 @@ class DataNode(pb2_grpc.DataNodeServiceServicer):
         El DataNode actúa como cliente gRPC temporalmente.
         """
         file_id = request.file_id
-        source = request.source_node
-        print(f"[{NODE_ID}] Iniciando replicación de {file_id} desde {source.address}:{source.port}", flush=True)
+        source_addr = request.source_node_address
+        source_port = request.source_node_port
+
+        print(f"[{NODE_ID}] Iniciando replicación de {file_id} desde {source_addr}:{source_port}", flush=True)
 
         temp_path = STORAGE_DIR / f"{file_id}_repl_{uuid.uuid4()}.tmp"
         final_path = STORAGE_DIR / file_id
 
         if final_path.exists():
-            return pb2.ReplicateResponse(success=True, message="Archivo ya existe localmente")
+            return pb2.ReplicationResponse(success=True, message="Archivo ya existe localmente")
 
         channel = None
         try:
             # 1. Conectarse al nodo origen
             # Nota: Usamos insecure channel internamente entre contenedores
-            channel = grpc.insecure_channel(f"{source.address}:{source.port}")
+            channel = grpc.insecure_channel(f"{source_addr}:{source_port}")
             stub = pb2_grpc.DataNodeServiceStub(channel)
 
             # 2. Solicitar el archivo (Stream)
@@ -196,14 +198,14 @@ class DataNode(pb2_grpc.DataNodeServiceServicer):
             # 4. Finalizar
             temp_path.rename(final_path)
             print(f"[{NODE_ID}] Replicación exitosa: {file_id} ({bytes_written} bytes)", flush=True)
-            return pb2.ReplicateResponse(success=True, message="Replicación completada")
+            return pb2.ReplicationResponse(success=True, message="Replicación completada")
 
         except Exception as e:
             if temp_path.exists():
                 os.remove(temp_path)
-            error_msg = f"Error replicando desde {source.address}: {e}"
+            error_msg = f"Error replicando desde {source_addr}: {e}"
             print(f"[{NODE_ID}] {error_msg}", flush=True)
-            return pb2.ReplicateResponse(success=False, message=error_msg)
+            return pb2.ReplicationResponse(success=False, message=error_msg)
         finally:
             if channel:
                 channel.close()    

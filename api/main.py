@@ -8,10 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from pydantic import BaseModel
 import os
+import grpc
+import random
 from pathlib import Path
 
-from tags.core.tag_service import TagService
-from tags.utils.helpers import normalize_tags
+# gRPC protos
+import protos.service_pb2 as pb2
+import protos.service_pb2_grpc as pb2_grpc
 
 # Importar módulos de autenticación
 from sqlalchemy.orm import Session
@@ -42,9 +45,79 @@ app.add_middleware(
 # Incluir router de autenticación
 app.include_router(auth.router)
 
-# Inicializar el servicio de tags
-DATA_DIR = "./tags_data"
-tag_service = TagService(DATA_DIR)
+# ==================== METADATA SERVICE CONNECTION ====================
+
+def get_metadata_nodes():
+    """Get all IPs for metadata_service from DNS (dynamic discovery)"""
+    import socket
+    try:
+        # Docker's network-alias returns ALL IPs for containers with that alias
+        hostname = "metadata_service"
+        port = 50051
+        # getaddrinfo returns all IPs associated with the hostname
+        addr_info = socket.getaddrinfo(hostname, port, socket.AF_INET, socket.SOCK_STREAM)
+        nodes = []
+        seen_ips = set()
+        for info in addr_info:
+            ip = info[4][0]
+            if ip not in seen_ips:
+                seen_ips.add(ip)
+                nodes.append({"host": ip, "port": port})
+        return nodes if nodes else [{"host": "metadata_1", "port": 50051}]
+    except Exception as e:
+        print(f"DNS lookup failed: {e}, using fallback", flush=True)
+        # Fallback to environment variable
+        nodes_str = os.getenv("METADATA_NODES", "metadata_1:50051")
+        nodes = []
+        for node in nodes_str.split(","):
+            parts = node.strip().split(":")
+            if len(parts) == 2:
+                nodes.append({"host": parts[0], "port": int(parts[1])})
+        return nodes
+
+def get_datanode_nodes():
+    """Get all IPs for datanode_service from DNS (dynamic discovery)"""
+    import socket
+    try:
+        hostname = "datanode_service"
+        port = 50052
+        addr_info = socket.getaddrinfo(hostname, port, socket.AF_INET, socket.SOCK_STREAM)
+        nodes = []
+        seen_ips = set()
+        for info in addr_info:
+            ip = info[4][0]
+            if ip not in seen_ips:
+                seen_ips.add(ip)
+                nodes.append({"host": ip, "port": port})
+        return nodes if nodes else [{"host": "datanode_1", "port": 50052}]
+    except Exception as e:
+        print(f"DNS lookup failed: {e}, using fallback", flush=True)
+        nodes_str = os.getenv("DATANODE_NODES", "datanode_1:50052")
+        nodes = []
+        for node in nodes_str.split(","):
+            parts = node.strip().split(":")
+            if len(parts) == 2:
+                nodes.append({"host": parts[0], "port": int(parts[1])})
+        return nodes
+
+def get_metadata_stub():
+    """Get a random metadata node stub for load balancing (with dynamic discovery)"""
+    nodes = get_metadata_nodes()
+    node = random.choice(nodes)
+    channel = grpc.insecure_channel(
+        f"{node['host']}:{node['port']}",
+        options=[
+            ('grpc.keepalive_time_ms', 10000),
+            ('grpc.keepalive_timeout_ms', 5000),
+            ('grpc.http2.max_pings_without_data', 0),
+        ]
+    )
+    return pb2_grpc.MetadataServiceStub(channel)
+
+def get_datanode_stub(node_host_port):
+    """Get datanode stub for specific node"""
+    channel = grpc.insecure_channel(node_host_port)
+    return pb2_grpc.DataNodeServiceStub(channel)
 
 # Modelos Pydantic
 class FileInfo(BaseModel):
@@ -88,8 +161,33 @@ def check_file_ownership(db: Session, filename: str, user: User) -> FileDB:
     """Verifica que el usuario sea dueño del archivo o admin"""
     file_db = db.query(FileDB).filter(FileDB.filename == filename).first()
     
+    # If file not in local DB, try to sync from metadata service
     if not file_db:
-        raise HTTPException(status_code=404, detail="Archivo no encontrado en la base de datos")
+        try:
+            stub = get_metadata_stub()
+            response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+            
+            for f in response.files:
+                if f.metadata.filename == filename:
+                    # Create DB entry for this file
+                    import json
+                    file_db = FileDB(
+                        filename=filename,
+                        original_filename=filename,
+                        owner_id=int(f.metadata.owner_id),
+                        tags=json.dumps(list(f.metadata.tags)),
+                        size=f.metadata.size,
+                        mime_type=f.metadata.mime_type
+                    )
+                    db.add(file_db)
+                    db.commit()
+                    db.refresh(file_db)
+                    break
+        except Exception as e:
+            print(f"Error syncing file from metadata: {e}", flush=True)
+    
+    if not file_db:
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
     
     # Si es admin, puede acceder a cualquier archivo
     if user.is_admin == 1:
@@ -138,23 +236,76 @@ async def upload_file(
     try:
         # Leer el contenido del archivo
         content = await file.read()
-        
-        # Guardar directamente usando FileStore
         filename = file.filename
-        tag_service.store.add_file(filename, content)
+        file_size = len(content)
         
-        # Añadir tags si existen
+        # Normalizar tags
         if tags:
-            normalized_tags = normalize_tags(tags)
-            tag_service.store.add_tags(filename, normalized_tags)
+            normalized_tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
         else:
             normalized_tags = []
         
-        # Obtener el tamaño del archivo
-        file_path = Path(DATA_DIR) / "files" / filename
-        file_size = file_path.stat().st_size
+        # 1. Request write allocation from metadata service
+        stub = get_metadata_stub()
+        write_request = pb2.WriteRequest(
+            filename=filename,
+            size=file_size,
+            tags=normalized_tags,
+            owner_id=str(current_user.id),
+            mime_type=file.content_type or "application/octet-stream"
+        )
+        allocation = stub.AssignWrite(write_request, timeout=5.0)
         
-        # Registrar en la base de datos asociado al usuario
+        file_id = allocation.file_id
+        target_nodes = allocation.target_nodes
+        
+        # 2. Upload chunks to assigned datanodes
+        successful_nodes = []
+        if target_nodes:
+            for node in target_nodes:
+                try:
+                    node_address = f"{node.address}:{node.port}"
+                    datanode_stub = get_datanode_stub(node_address)
+                    
+                    # Stream chunks to datanode
+                    CHUNK_SIZE = 1024 * 1024  # 1MB
+                    def chunk_generator():
+                        offset = 0
+                        while offset < file_size:
+                            chunk_data = content[offset:offset + CHUNK_SIZE]
+                            is_last = (offset + len(chunk_data)) >= file_size
+                            yield pb2.FileChunk(
+                                file_id=file_id,
+                                content=chunk_data,
+                                offset=offset,
+                                is_last=is_last
+                            )
+                            offset += len(chunk_data)
+                    
+                    store_response = datanode_stub.StoreChunk(chunk_generator(), timeout=30.0)
+                    
+                    if store_response.success:
+                        successful_nodes.append(node.node_id)
+                except Exception as e:
+                    print(f"Failed to upload to {node.address}:{node.port}: {e}", flush=True)
+                    continue
+        
+        # 3. Commit write to metadata service
+        if successful_nodes:
+            commit_request = pb2.CommitRequest(
+                file_id=file_id,
+                size=file_size,
+                success=True,
+                successful_nodes=successful_nodes
+            )
+            commit_response = stub.CommitWrite(commit_request, timeout=5.0)
+            
+            if not commit_response.success:
+                raise HTTPException(status_code=500, detail=f"Commit failed: {commit_response.message}")
+        else:
+            raise HTTPException(status_code=500, detail="No datanode accepted the file")
+        
+        # Registrar en la base de datos local asociado al usuario
         get_or_create_file_in_db(
             db=db,
             filename=filename,
@@ -186,39 +337,39 @@ async def list_files(
     - **tags**: Tags para filtrar, separados por comas (AND logic)
     """
     try:
-        # Recargar files.json por si fue modificado por el CLI
-        tag_service.store.reload_meta()
-        
-        if tags:
-            # Filtrar por tags
-            files_with_tags = tag_service.list_by_tags(tags)
-        else:
-            # Mostrar todos
-            files_with_tags = tag_service.show_all()
-        
-        # Filtrar archivos según el usuario (admin ve todo, usuario normal solo los suyos)
-        filtered_files = filter_files_by_user(files_with_tags, db, current_user)
+        # Consultar metadata service via gRPC
+        stub = get_metadata_stub()
+        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
         
         result = []
-        files_dir = Path(DATA_DIR) / "files"
-        
-        for filename, file_tags in filtered_files:
-            file_path = files_dir / filename
-            if file_path.exists():
-                # Si es admin, incluir información del propietario
-                owner_name = None
-                if current_user.is_admin == 1:
-                    file_db = db.query(FileDB).filter(FileDB.filename == filename).first()
-                    if file_db and file_db.owner:
-                        owner_name = file_db.owner.username
-                
-                result.append(FileResponse(
-                    name=filename,
-                    tags=file_tags,
-                    size=file_path.stat().st_size,
-                    url=f"/files/{filename}",
-                    owner=owner_name
-                ))
+        for file_loc in response.files:
+            file_meta = file_loc.metadata
+            # Filtrar por tags si se especificaron
+            if tags:
+                requested_tags = set(tag.strip().lower() for tag in tags.split(","))
+                file_tags_set = set(tag.lower() for tag in file_meta.tags)
+                if not requested_tags.issubset(file_tags_set):
+                    continue
+            
+            # Filtrar por usuario (admin ve todo, usuario normal solo suyos)
+            if current_user.is_admin != 1:
+                if str(file_meta.owner_id) != str(current_user.id):
+                    continue
+            
+            # Si es admin, incluir información del propietario
+            owner_name = None
+            if current_user.is_admin == 1:
+                file_db = db.query(FileDB).filter(FileDB.filename == file_meta.filename).first()
+                if file_db and file_db.owner:
+                    owner_name = file_db.owner.username
+            
+            result.append(FileResponse(
+                name=file_meta.filename,
+                tags=list(file_meta.tags),
+                size=file_meta.size,
+                url=f"/files/{file_meta.filename}",
+                owner=owner_name
+            ))
         
         return result
     
@@ -236,19 +387,49 @@ async def download_file(
     
     - **filename**: Nombre del archivo
     """
-    # Verificar propiedad del archivo
-    check_file_ownership(db, filename, current_user)
+    try:
+        # Verificar propiedad del archivo en DB local
+        check_file_ownership(db, filename, current_user)
+        
+        # Get file metadata from metadata service
+        stub = get_metadata_stub()
+        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+        
+        file_loc = None
+        for f in response.files:
+            if f.metadata.filename == filename:
+                file_loc = f
+                break
+        
+        if not file_loc or not file_loc.replica_nodes:
+            raise HTTPException(status_code=404, detail="Archivo no encontrado")
+        
+        # Download from first available datanode replica
+        target_node = file_loc.replica_nodes[0]
+        target_datanode = f"{target_node.address}:{target_node.port}"
+        datanode_stub = get_datanode_stub(target_datanode)
+        
+        # Request chunks from datanode
+        download_request = pb2.FileRequest(file_id=file_loc.file_id)
+        chunks = datanode_stub.RetrieveChunk(download_request)
+        
+        # Collect all chunks
+        file_content = b""
+        for chunk in chunks:
+            file_content += chunk.content
+        
+        # Return as streaming response
+        from fastapi.responses import Response
+        return Response(
+            content=file_content,
+            media_type=file_loc.metadata.mime_type or "application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        )
     
-    file_path = Path(DATA_DIR) / "files" / filename
-    
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Archivo no encontrado")
-    
-    return FileResponse(
-        path=file_path,
-        filename=filename,
-        media_type="application/octet-stream"
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al descargar archivo: {str(e)}")
 
 @app.delete("/files/{filename}")
 async def delete_file(
@@ -265,20 +446,24 @@ async def delete_file(
         # Verificar propiedad del archivo
         file_db = check_file_ownership(db, filename, current_user)
         
-        # Obtener los tags del archivo para poder eliminarlo
-        files_with_tags = tag_service.show_all()
-        file_tags = None
+        # Get file_id from metadata service
+        stub = get_metadata_stub()
+        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
         
-        for name, tags in files_with_tags:
-            if name == filename:
-                file_tags = tags
+        file_id = None
+        for f in response.files:
+            if f.metadata.filename == filename:
+                file_id = f.file_id
                 break
         
-        if file_tags is None:
+        if not file_id:
             raise HTTPException(status_code=404, detail="Archivo no encontrado")
         
-        # Eliminar usando todos sus tags
-        tag_service.delete_by_tags(file_tags)
+        # Delete via gRPC
+        delete_response = stub.DeleteFile(pb2.FileRequest(file_id=file_id), timeout=5.0)
+        
+        if not delete_response.success:
+            raise HTTPException(status_code=500, detail=f"Error al eliminar archivo: {delete_response.message}")
         
         # Eliminar de la base de datos
         db.delete(file_db)
@@ -308,27 +493,28 @@ async def update_file_tags(
         # Verificar propiedad del archivo
         file_db = check_file_ownership(db, filename, current_user)
         
-        # Verificar que el archivo existe
-        files_with_tags = tag_service.show_all()
-        file_exists = any(name == filename for name, _ in files_with_tags)
+        # Get file_id from metadata service
+        stub = get_metadata_stub()
+        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
         
-        if not file_exists:
-            raise HTTPException(status_code=404, detail="Archivo no encontrado")
-        
-        # Obtener tags actuales
-        current_tags = None
-        for name, tags in files_with_tags:
-            if name == filename:
-                current_tags = tags
+        file_id = None
+        for f in response.files:
+            if f.metadata.filename == filename:
+                file_id = f.file_id
                 break
         
-        # Eliminar tags actuales
-        if current_tags:
-            tag_service.store.remove_tags(filename, current_tags)
+        if not file_id:
+            raise HTTPException(status_code=404, detail="Archivo no encontrado")
         
-        # Añadir nuevos tags
-        if tags_update.tags:
-            tag_service.store.add_tags(filename, tags_update.tags)
+        # Update tags via gRPC
+        update_request = pb2.UpdateTagsRequest(
+            file_id=file_id,
+            tags=tags_update.tags
+        )
+        tag_response = stub.UpdateTags(update_request, timeout=5.0)
+        
+        if not tag_response.success:
+            raise HTTPException(status_code=500, detail="Error al actualizar tags en metadata service")
         
         # Actualizar tags en la base de datos
         import json
@@ -347,7 +533,12 @@ async def update_file_tags(
         raise HTTPException(status_code=500, detail=f"Error al actualizar tags: {str(e)}")
 
 @app.post("/files/{filename}/tags")
-async def add_tags_to_file(filename: str, tags_update: TagsUpdate):
+async def add_tags_to_file(
+    filename: str,
+    tags_update: TagsUpdate,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
     """
     Añadir tags a un archivo (sin eliminar los existentes)
     
@@ -355,23 +546,38 @@ async def add_tags_to_file(filename: str, tags_update: TagsUpdate):
     - **tags**: Tags a añadir
     """
     try:
-        # Verificar que el archivo existe
-        files_with_tags = tag_service.show_all()
-        file_exists = any(name == filename for name, _ in files_with_tags)
+        # Verificar propiedad del archivo
+        check_file_ownership(db, filename, current_user)
         
-        if not file_exists:
+        # Get file_id from metadata service
+        stub = get_metadata_stub()
+        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+        
+        file_id = None
+        current_tags = []
+        for f in response.files:
+            if f.metadata.filename == filename:
+                file_id = f.file_id
+                current_tags = list(f.metadata.tags)
+                break
+        
+        if not file_id:
             raise HTTPException(status_code=404, detail="Archivo no encontrado")
         
-        # Añadir tags
-        tag_service.store.add_tags(filename, tags_update.tags)
+        # Add tags via gRPC
+        add_request = pb2.TagRequest(
+            file_id=file_id,
+            tags=tags_update.tags
+        )
+        tag_response = stub.AddTags(add_request, timeout=5.0)
         
-        # Obtener tags actualizados
-        updated_tags = tag_service.store.meta.get(filename, [])
+        if not tag_response.success:
+            raise HTTPException(status_code=500, detail="Error al añadir tags en metadata service")
         
         return {
             "message": "Tags añadidos correctamente",
             "filename": filename,
-            "tags": list(updated_tags)
+            "tags": list(tag_response.current_tags)
         }
     
     except HTTPException:
@@ -380,7 +586,12 @@ async def add_tags_to_file(filename: str, tags_update: TagsUpdate):
         raise HTTPException(status_code=500, detail=f"Error al añadir tags: {str(e)}")
 
 @app.delete("/files/{filename}/tags")
-async def remove_tags_from_file(filename: str, tags_update: TagsUpdate):
+async def remove_tags_from_file(
+    filename: str,
+    tags_update: TagsUpdate,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
     """
     Eliminar tags específicos de un archivo
     
@@ -388,23 +599,36 @@ async def remove_tags_from_file(filename: str, tags_update: TagsUpdate):
     - **tags**: Tags a eliminar
     """
     try:
-        # Verificar que el archivo existe
-        files_with_tags = tag_service.show_all()
-        file_exists = any(name == filename for name, _ in files_with_tags)
+        # Verificar propiedad del archivo
+        check_file_ownership(db, filename, current_user)
         
-        if not file_exists:
+        # Get file_id from metadata service
+        stub = get_metadata_stub()
+        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+        
+        file_id = None
+        for f in response.files:
+            if f.metadata.filename == filename:
+                file_id = f.file_id
+                break
+        
+        if not file_id:
             raise HTTPException(status_code=404, detail="Archivo no encontrado")
         
-        # Eliminar tags
-        tag_service.store.remove_tags(filename, tags_update.tags)
+        # Remove tags via gRPC
+        remove_request = pb2.TagRequest(
+            file_id=file_id,
+            tags=tags_update.tags
+        )
+        tag_response = stub.RemoveTags(remove_request, timeout=5.0)
         
-        # Obtener tags actualizados
-        updated_tags = tag_service.store.meta.get(filename, [])
+        if not tag_response.success:
+            raise HTTPException(status_code=500, detail="Error al eliminar tags en metadata service")
         
         return {
             "message": "Tags eliminados correctamente",
             "filename": filename,
-            "tags": list(updated_tags)
+            "tags": list(tag_response.current_tags)
         }
     
     except HTTPException:
@@ -421,18 +645,20 @@ async def get_all_tags(
     Obtener todos los tags únicos (admin: todos, usuario: solo de sus archivos)
     """
     try:
-        # Recargar files.json por si fue modificado por el CLI
-        tag_service.store.reload_meta()
-        
-        files_with_tags = tag_service.show_all()
-        
-        # Filtrar archivos según usuario
-        filtered_files = filter_files_by_user(files_with_tags, db, current_user)
+        # Consultar metadata service via gRPC
+        stub = get_metadata_stub()
+        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
         
         tag_count = {}
         
-        for _, tags in filtered_files:
-            for tag in tags:
+        for file_loc in response.files:
+            file_meta = file_loc.metadata
+            # Filtrar por usuario (admin ve todo, usuario normal solo suyos)
+            if current_user.is_admin != 1:
+                if str(file_meta.owner_id) != str(current_user.id):
+                    continue
+            
+            for tag in file_meta.tags:
                 tag_count[tag] = tag_count.get(tag, 0) + 1
         
         # Ordenar por frecuencia descendente
@@ -455,21 +681,24 @@ async def get_statistics(
     Obtener estadísticas (admin: globales, usuario: personales)
     """
     try:
-        files_with_tags = list(tag_service.show_all())
+        # Consultar metadata service via gRPC
+        stub = get_metadata_stub()
+        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
         
-        # Filtrar archivos según usuario
-        filtered_files = filter_files_by_user(files_with_tags, db, current_user)
-        
-        total_files = len(filtered_files)
+        total_files = 0
         all_tags = set()
-        files_dir = Path(DATA_DIR) / "files"
         total_size = 0
         
-        for filename, tags in filtered_files:
-            all_tags.update(tags)
-            file_path = files_dir / filename
-            if file_path.exists():
-                total_size += file_path.stat().st_size
+        for file_loc in response.files:
+            file_meta = file_loc.metadata
+            # Filtrar por usuario (admin ve todo, usuario normal solo suyos)
+            if current_user.is_admin != 1:
+                if str(file_meta.owner_id) != str(current_user.id):
+                    continue
+            
+            total_files += 1
+            all_tags.update(file_meta.tags)
+            total_size += file_meta.size
         
         return {
             "total_files": total_files,
@@ -684,132 +913,6 @@ async def analytics_user_stats(
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al obtener analytics: {str(e)}")
-
-
-# ==================== ENDPOINTS PARA CLI (SIN AUTENTICACIÓN) ====================
-# Estos endpoints sincronizan files.json con la BD, asignando archivos al admin
-
-@app.post("/cli/sync", tags=["CLI"])
-async def cli_sync_files(db: Session = Depends(get_db)):
-    """
-    Sincroniza todos los archivos de files.json con la BD (asignados al admin)
-    
-    Este endpoint es para uso del CLI únicamente.
-    Lee files.json y crea registros en la BD para archivos que no existan.
-    """
-    try:
-        # Recargar files.json desde disco antes de sincronizar
-        tag_service.store.reload_meta()
-        
-        # Obtener el usuario admin (primer usuario con is_admin=1)
-        admin_user = db.query(User).filter(User.is_admin == 1).first()
-        
-        if not admin_user:
-            raise HTTPException(
-                status_code=500, 
-                detail="No existe usuario admin en la BD. Ejecuta migrate_admin.py primero."
-            )
-        
-        # Leer todos los archivos de files.json
-        files_with_tags = tag_service.show_all()
-        files_dir = Path(DATA_DIR) / "files"
-        
-        synced_count = 0
-        skipped_count = 0
-        
-        for filename, tags in files_with_tags:
-            file_path = files_dir / filename
-            
-            # Verificar si el archivo existe físicamente
-            if not file_path.exists():
-                skipped_count += 1
-                continue
-            
-            # Verificar si ya existe en la BD
-            existing_file = db.query(FileDB).filter(FileDB.filename == filename).first()
-            
-            if not existing_file:
-                # Crear nuevo registro asignado al admin
-                import json
-                file_size = file_path.stat().st_size
-                
-                new_file = FileDB(
-                    filename=filename,
-                    original_filename=filename,
-                    owner_id=admin_user.id,
-                    tags=json.dumps(tags),
-                    size=file_size,
-                    mime_type="application/octet-stream"
-                )
-                db.add(new_file)
-                synced_count += 1
-            else:
-                skipped_count += 1
-        
-        db.commit()
-        
-        return {
-            "message": "Sincronización completada",
-            "admin_user": admin_user.username,
-            "synced": synced_count,
-            "skipped": skipped_count,
-            "total": synced_count + skipped_count
-        }
-    
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error en sincronización: {str(e)}")
-
-
-@app.get("/cli/files", tags=["CLI"])
-async def cli_list_files(tags: Optional[str] = None):
-    """
-    Listar archivos desde files.json (sin autenticación, para CLI)
-    
-    - **tags**: Tags para filtrar, separados por comas
-    """
-    try:
-        # Recargar files.json desde disco antes de listar
-        tag_service.store.reload_meta()
-        
-        if tags:
-            files_with_tags = tag_service.list_by_tags(tags)
-        else:
-            files_with_tags = tag_service.show_all()
-        
-        result = []
-        files_dir = Path(DATA_DIR) / "files"
-        
-        for filename, file_tags in files_with_tags:
-            file_path = files_dir / filename
-            if file_path.exists():
-                result.append({
-                    "name": filename,
-                    "tags": file_tags,
-                    "size": file_path.stat().st_size,
-                    "url": f"/files/{filename}"
-                })
-        
-        return result
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al listar archivos: {str(e)}")
-
-
-@app.get("/cli/tags", tags=["CLI"])
-async def cli_list_tags():
-    """
-    Listar todos los tags desde files.json (sin autenticación, para CLI)
-    """
-    try:
-        # Recargar files.json desde disco antes de listar
-        tag_service.store.reload_meta()
-        
-        all_tags = tag_service.get_all_tags()
-        return {"tags": sorted(all_tags)}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al listar tags: {str(e)}")
 
 
 if __name__ == "__main__":

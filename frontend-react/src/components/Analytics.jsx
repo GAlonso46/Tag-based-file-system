@@ -13,6 +13,7 @@ import {
 } from 'chart.js';
 import { Bar, Pie, Line } from 'react-chartjs-2';
 import { useAuth } from '../context/AuthContext';
+import { API_URL } from '../config';
 import './Analytics.css';
 
 // Registrar componentes de Chart.js
@@ -27,8 +28,6 @@ ChartJS.register(
     LineElement,
     PointElement
 );
-
-const API_URL = 'http://localhost:8000';
 
 export const Analytics = () => {
     const { user } = useAuth();
