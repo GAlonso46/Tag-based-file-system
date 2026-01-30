@@ -413,7 +413,7 @@ def discover_datanode_ips():
     try:
         results = socket.getaddrinfo(
             "datanode_service",
-            None,
+            0,
             family=socket.AF_INET,
             type=socket.SOCK_STREAM
         )

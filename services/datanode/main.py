@@ -228,6 +228,8 @@ def heartbeat_sender():
     NODE_ID|IP|PORT|LOAD|FILE_ID_1,FILE_ID_2,...
     """
 
+    time.sleep(5)  # Esperar a que el servicio gRPC arranque
+    
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     container_ip = get_container_ip()
 
@@ -241,7 +243,7 @@ def heartbeat_sender():
             try:
                 results = socket.getaddrinfo(
                     "metadata_service",
-                    None,
+                    0,
                     family=socket.AF_INET,
                     type=socket.SOCK_DGRAM
                 )
