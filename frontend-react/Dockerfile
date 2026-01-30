@@ -13,8 +13,8 @@ RUN yarn install --frozen-lockfile
 # Copiar código fuente
 COPY . .
 
-# Argumento para la URL del API
-ARG VITE_API_URL=http://localhost:8000
+# Argumento para la URL del API (ahora usa ruta relativa)
+ARG VITE_API_URL=/api
 ENV VITE_API_URL=${VITE_API_URL}
 
 # Build para producción
