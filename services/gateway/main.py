@@ -47,9 +47,7 @@ def startup():
     Base.metadata.create_all(bind=engine)
 
 
-# gRPC Clients
-_metadata_channel = None
-_metadata_stub = None
+# gRPC Clients - no longer maintaining persistent connections
 
 def get_grpc_credentials():
     """Get gRPC credentials (TLS or insecure)"""
@@ -76,38 +74,27 @@ def get_grpc_credentials():
         print("[Gateway] Falling back to insecure connections", flush=True)
         return None
 
-def get_metadata_stub():
-    """Get metadata stub with retry logic to find leader"""
-    global _metadata_channel, _metadata_stub
-    
-    # Try to reuse existing connection
-    if _metadata_stub is not None:
-        return _metadata_stub
-    
-    # Create new connection
+def new_metadata_stub():
+    """Create a new ephemeral metadata stub (DNS round-robin each time)"""
     options = [
         ('grpc.max_send_message_length', 100 * 1024 * 1024),
         ('grpc.max_receive_message_length', 100 * 1024 * 1024),
-        ('grpc.keepalive_time_ms', 10000),
-        ('grpc.keepalive_timeout_ms', 5000),
-        ('grpc.http2.min_time_between_pings_ms', 10000),
-        ('grpc.http2.max_pings_without_data', 0),
     ]
     
     credentials = get_grpc_credentials()
     if credentials:
-        _metadata_channel = grpc.secure_channel(
+        channel = grpc.secure_channel(
             f'{METADATA_HOST}:{METADATA_PORT}',
             credentials,
             options=options
         )
     else:
-        _metadata_channel = grpc.insecure_channel(
+        channel = grpc.insecure_channel(
             f'{METADATA_HOST}:{METADATA_PORT}',
             options=options
         )
-    _metadata_stub = pb2_grpc.MetadataServiceStub(_metadata_channel)
-    return _metadata_stub
+    
+    return pb2_grpc.MetadataServiceStub(channel), channel
 
 def get_all_metadata_stubs():
     """Get stubs for ALL metadata replicas using round-robin DNS queries"""
@@ -135,72 +122,12 @@ def get_all_metadata_stubs():
             print(f"[Gateway] Failed to connect to metadata replica {i+1}: {e}", flush=True)
     
     print(f"[Gateway] Created {len(stubs)} metadata connections (expecting {EXPECTED_REPLICAS})", flush=True)
-    return stubs if stubs else [get_metadata_stub()]
+    if not stubs:
+        stub, channel = new_metadata_stub()
+        return [(stub, channel)]
+    return stubs
 
-def call_metadata_with_leader_retry(method_name, request, timeout=10, max_retries=5):
-    """
-    Call metadata RPC with automatic retry to find leader.
-    
-    If a node returns FAILED_PRECONDITION (not leader), we retry with a fresh connection.
-    Docker Swarm DNS will round-robin to different metadata replicas.
-    Also retries on UNAVAILABLE status (node temporarily down).
-    """
-    global _metadata_channel, _metadata_stub
-    
-    for attempt in range(max_retries):
-        try:
-            stub = get_metadata_stub()
-            method = getattr(stub, method_name)
-            return method(request, timeout=timeout)
-            
-        except grpc.RpcError as e:
-            should_retry = False
-            error_msg = ""
-            
-            if e.code() == grpc.StatusCode.FAILED_PRECONDITION:
-                # Not leader, retry with different node
-                error_msg = "Node not leader"
-                should_retry = True
-            elif e.code() == grpc.StatusCode.UNAVAILABLE:
-                # Node unavailable, retry
-                error_msg = "Node unavailable"
-                should_retry = True
-            elif e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
-                # Timeout, retry
-                error_msg = "Request timeout"
-                should_retry = True
-            else:
-                # Other RPC error, don't retry
-                raise HTTPException(500, f"Metadata service error: {e.details()}")
-            
-            if should_retry and attempt < max_retries - 1:
-                print(f"[Gateway] {error_msg}, retrying... (attempt {attempt + 1}/{max_retries})", flush=True)
-                
-                # Force new connection on next attempt
-                if _metadata_channel is not None:
-                    try:
-                        _metadata_channel.close()
-                    except:
-                        pass
-                _metadata_channel = None
-                _metadata_stub = None
-                
-                import time
-                # Exponential backoff
-                time.sleep(0.5 * (2 ** attempt))
-                continue
-            elif attempt >= max_retries - 1:
-                # All retries exhausted
-                raise HTTPException(503, f"Could not complete metadata operation after {max_retries} attempts: {error_msg}")
-            
-        except Exception as e:
-            # Non-RPC error
-            if attempt < max_retries - 1:
-                print(f"[Gateway] Internal error, retrying: {str(e)}", flush=True)
-                import time
-                time.sleep(0.5 * (2 ** attempt))
-                continue
-            raise HTTPException(500, f"Internal error: {str(e)}")
+
 
 def get_datanode_stub(host, port):
     options = [
@@ -251,19 +178,22 @@ async def upload_file(
         size = len(content)
         normalized_tags = normalize_tags(tags) if tags else []
 
-        meta = get_metadata_stub()
+        meta, channel = new_metadata_stub()
 
         # Ask Metadata where to put it
-        alloc = meta.AssignWrite(
-            pb2.WriteRequest(
-                filename=filename,
-                size=size,
-                tags=normalized_tags,
-                owner_id=str(current_user.id),
-                mime_type=file.content_type
-            ),
-            timeout=10
-        )
+        try:
+            alloc = meta.AssignWrite(
+                pb2.WriteRequest(
+                    filename=filename,
+                    size=size,
+                    tags=normalized_tags,
+                    owner_id=str(current_user.id),
+                    mime_type=file.content_type
+                ),
+                timeout=5
+            )
+        finally:
+            channel.close()
 
         file_id = alloc.file_id
         target_nodes = alloc.target_nodes
@@ -307,15 +237,19 @@ async def upload_file(
             )
 
         # Commit metadata
-        meta.CommitWrite(
-            pb2.CommitRequest(
-                file_id=file_id,
-                size=size,
-                success=True,
-                successful_nodes=success_nodes
-            ),
-            timeout=10
-        )
+        meta, channel = new_metadata_stub()
+        try:
+            meta.CommitWrite(
+                pb2.CommitRequest(
+                    file_id=file_id,
+                    size=size,
+                    success=True,
+                    successful_nodes=success_nodes
+                ),
+                timeout=5
+            )
+        finally:
+            channel.close()
 
         return {
             "name": filename,
@@ -334,71 +268,71 @@ async def download_file(
     file_id: str,
     current_user: User = Depends(get_current_active_user)
 ):
-    meta = get_metadata_stub()
+    meta, channel = new_metadata_stub()
 
     try:
         loc = meta.LocateFile(
             pb2.FileRequest(file_id=file_id),
-            timeout=10
+            timeout=5
         )
+    finally:
+        channel.close()
 
-        if not loc.replica_nodes:
-            raise HTTPException(404, "File not found")
+    if not loc.replica_nodes:
+        raise HTTPException(404, "File not found")
 
-        # Try replicas one by one
-        for node in loc.replica_nodes:
-            try:
-                ds = get_datanode_stub(node.address, node.port)
-                ds.Ping(pb2.PingRequest(), timeout=2)
+    # Try replicas one by one
+    for node in loc.replica_nodes:
+        try:
+            ds = get_datanode_stub(node.address, node.port)
+            ds.Ping(pb2.PingRequest(), timeout=2)
 
-                chunks_iter = ds.RetrieveChunk(
-                    pb2.FileRequest(file_id=file_id),
-                    timeout=30
-                )
+            chunks_iter = ds.RetrieveChunk(
+                pb2.FileRequest(file_id=file_id),
+                timeout=30
+            )
 
-                def stream():
-                    for chunk in chunks_iter:
-                        yield chunk.content
+            def stream():
+                for chunk in chunks_iter:
+                    yield chunk.content
 
-                return StreamingResponse(
-                    stream(),
-                    media_type="application/octet-stream",
-                    headers={
-                        "Content-Disposition":
-                        f"attachment; filename={loc.metadata.filename}"
-                    }
-                )
+            return StreamingResponse(
+                stream(),
+                media_type="application/octet-stream",
+                headers={
+                    "Content-Disposition":
+                    f"attachment; filename={loc.metadata.filename}"
+                }
+            )
 
-            except Exception as e:
-                print(
-                    f"[Gateway] Replica {node.node_id} failed: {e}",
-                    flush=True
-                )
-                continue
+        except Exception as e:
+            print(
+                f"[Gateway] Replica {node.node_id} failed: {e}",
+                flush=True
+            )
+            continue
 
-        raise HTTPException(503, "No replicas available")
-
-    except grpc.RpcError as e:
-        if e.code() == grpc.StatusCode.NOT_FOUND:
-            raise HTTPException(404, "File not found")
-        raise HTTPException(500, e.details())
+    raise HTTPException(503, "No replicas available")
 
 
 @app.delete("/files/{file_id}")
 async def delete_file(file_id: str, current_user: User = Depends(get_current_active_user)):
     """Delete a file (soft delete with tombstone)"""
     try:
-        meta = get_metadata_stub()
+        meta, channel = new_metadata_stub()
         
-        # Verify file exists and user has permission
-        loc = meta.LocateFile(pb2.FileRequest(file_id=file_id), timeout=10)
-        
-        # Check ownership (unless admin)
-        if current_user.is_admin != 1 and loc.metadata.owner_id != str(current_user.id):
-            raise HTTPException(403, "Not authorized to delete this file")
-        
-        # Mark as deleted in metadata (tombstone)
-        result = meta.DeleteFile(pb2.FileRequest(file_id=file_id), timeout=10)
+        try:
+            # Verify file exists and user has permission
+            loc = meta.LocateFile(pb2.FileRequest(file_id=file_id), timeout=5)
+            
+            # Check ownership (unless admin)
+            if current_user.is_admin != 1 and loc.metadata.owner_id != str(current_user.id):
+                raise HTTPException(403, "Not authorized to delete this file")
+            
+            # Mark as deleted in metadata (tombstone)
+            result = meta.DeleteFile(pb2.FileRequest(file_id=file_id), timeout=5)
+        finally:
+            channel.close()
         
         if result.success:
             return {"message": "File deleted successfully", "file_id": file_id}
@@ -427,21 +361,24 @@ async def update_tags(
         if not isinstance(new_tags, list):
             raise HTTPException(400, "'tags' must be an array")
         
-        meta = get_metadata_stub()
+        meta, channel = new_metadata_stub()
         
-        # Verify file exists and user has permission
-        loc = meta.LocateFile(pb2.FileRequest(file_id=file_id), timeout=10)
-        
-        # Check ownership (unless admin)
-        if current_user.is_admin != 1 and loc.metadata.owner_id != str(current_user.id):
-            raise HTTPException(403, "Not authorized to modify this file")
-        
-        # Update tags
-        normalized_tags = normalize_tags(",".join(new_tags)) if new_tags else []
-        result = meta.UpdateTags(pb2.UpdateTagsRequest(
-            file_id=file_id,
-            tags=normalized_tags
-        ), timeout=10)
+        try:
+            # Verify file exists and user has permission
+            loc = meta.LocateFile(pb2.FileRequest(file_id=file_id), timeout=5)
+            
+            # Check ownership (unless admin)
+            if current_user.is_admin != 1 and loc.metadata.owner_id != str(current_user.id):
+                raise HTTPException(403, "Not authorized to modify this file")
+            
+            # Update tags
+            normalized_tags = normalize_tags(",".join(new_tags)) if new_tags else []
+            result = meta.UpdateTags(pb2.UpdateTagsRequest(
+                file_id=file_id,
+                tags=normalized_tags
+            ), timeout=5)
+        finally:
+            channel.close()
         
         if result.success:
             return {
@@ -522,14 +459,17 @@ async def list_files(
 @app.get("/tags")
 async def get_all_tags(current_user: User = Depends(get_current_active_user)):
     """Get all unique tags from files with count"""
-    meta = get_metadata_stub()
+    meta, channel = new_metadata_stub()
     req = pb2.ListRequest()
     
     # Admin sees all tags, users see only their tags
     if current_user.is_admin != 1:
         req.owner_filter = str(current_user.id)
     
-    resp = meta.ListFiles(req, timeout=10)
+    try:
+        resp = meta.ListFiles(req, timeout=5)
+    finally:
+        channel.close()
     
     # Count tags
     tags_count = {}
@@ -546,14 +486,17 @@ async def get_all_tags(current_user: User = Depends(get_current_active_user)):
 @app.get("/stats")
 async def get_stats(current_user: User = Depends(get_current_active_user)):
     """Get statistics about files"""
-    meta = get_metadata_stub()
+    meta, channel = new_metadata_stub()
     req = pb2.ListRequest()
     
     # Admin sees all stats, users see only their stats
     if current_user.is_admin != 1:
         req.owner_filter = str(current_user.id)
     
-    resp = meta.ListFiles(req, timeout=10)
+    try:
+        resp = meta.ListFiles(req, timeout=5)
+    finally:
+        channel.close()
     
     total_files = len(resp.files)
     total_size = sum(f.metadata.size for f in resp.files)
@@ -579,13 +522,16 @@ async def get_files_by_date(days: int = 30, current_user: User = Depends(get_cur
     """Get files grouped by creation date"""
     from datetime import datetime, timedelta
     
-    meta = get_metadata_stub()
+    meta, channel = new_metadata_stub()
     req = pb2.ListRequest()
     
     if current_user.is_admin != 1:
         req.owner_filter = str(current_user.id)
     
-    resp = meta.ListFiles(req, timeout=10)
+    try:
+        resp = meta.ListFiles(req, timeout=5)
+    finally:
+        channel.close()
     
     # Group by date
     cutoff_date = datetime.now() - timedelta(days=days)
@@ -608,13 +554,16 @@ async def get_files_by_date(days: int = 30, current_user: User = Depends(get_cur
 @app.get("/analytics/files-by-type")
 async def get_files_by_type(current_user: User = Depends(get_current_active_user)):
     """Get files grouped by MIME type"""
-    meta = get_metadata_stub()
+    meta, channel = new_metadata_stub()
     req = pb2.ListRequest()
     
     if current_user.is_admin != 1:
         req.owner_filter = str(current_user.id)
     
-    resp = meta.ListFiles(req, timeout=10)
+    try:
+        resp = meta.ListFiles(req, timeout=5)
+    finally:
+        channel.close()
     
     # Group by type
     types_count = {}
@@ -632,13 +581,16 @@ async def get_files_by_type(current_user: User = Depends(get_current_active_user
 @app.get("/analytics/tags-usage")
 async def get_tags_usage(current_user: User = Depends(get_current_active_user)):
     """Get most used tags"""
-    meta = get_metadata_stub()
+    meta, channel = new_metadata_stub()
     req = pb2.ListRequest()
     
     if current_user.is_admin != 1:
         req.owner_filter = str(current_user.id)
     
-    resp = meta.ListFiles(req, timeout=10)
+    try:
+        resp = meta.ListFiles(req, timeout=5)
+    finally:
+        channel.close()
     
     # Count tags
     tag_counts = {}
@@ -657,13 +609,16 @@ async def get_tags_usage(current_user: User = Depends(get_current_active_user)):
 @app.get("/analytics/storage-by-tag")
 async def get_storage_by_tag(current_user: User = Depends(get_current_active_user)):
     """Get storage usage by tag"""
-    meta = get_metadata_stub()
+    meta, channel = new_metadata_stub()
     req = pb2.ListRequest()
     
     if current_user.is_admin != 1:
         req.owner_filter = str(current_user.id)
     
-    resp = meta.ListFiles(req, timeout=10)
+    try:
+        resp = meta.ListFiles(req, timeout=5)
+    finally:
+        channel.close()
     
     # Storage by tag
     storage_by_tag = {}
@@ -685,9 +640,12 @@ async def get_user_stats(current_user: User = Depends(get_current_active_user), 
     if current_user.is_admin != 1:
         return {"users": [], "total_users": 0}
     
-    meta = get_metadata_stub()
+    meta, channel = new_metadata_stub()
     req = pb2.ListRequest()
-    resp = meta.ListFiles(req, timeout=10)
+    try:
+        resp = meta.ListFiles(req, timeout=5)
+    finally:
+        channel.close()
     
     # Stats by owner ID
     user_stats = {}

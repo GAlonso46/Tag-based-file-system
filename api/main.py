@@ -100,19 +100,22 @@ def get_datanode_nodes():
                 nodes.append({"host": parts[0], "port": int(parts[1])})
         return nodes
 
-def get_metadata_stub():
-    """Get a random metadata node stub for load balancing (with dynamic discovery)"""
+def new_metadata_stub():
+    """Create a new ephemeral metadata stub (DNS round-robin each time)"""
     nodes = get_metadata_nodes()
     node = random.choice(nodes)
+    
+    options = [
+        ('grpc.max_send_message_length', 100 * 1024 * 1024),
+        ('grpc.max_receive_message_length', 100 * 1024 * 1024),
+    ]
+    
     channel = grpc.insecure_channel(
         f"{node['host']}:{node['port']}",
-        options=[
-            ('grpc.keepalive_time_ms', 10000),
-            ('grpc.keepalive_timeout_ms', 5000),
-            ('grpc.http2.max_pings_without_data', 0),
-        ]
+        options=options
     )
-    return pb2_grpc.MetadataServiceStub(channel)
+    
+    return pb2_grpc.MetadataServiceStub(channel), channel
 
 def get_datanode_stub(node_host_port):
     """Get datanode stub for specific node"""
@@ -164,7 +167,7 @@ def check_file_ownership(db: Session, filename: str, user: User) -> FileDB:
     # If file not in local DB, try to sync from metadata service
     if not file_db:
         try:
-            stub = get_metadata_stub()
+            stub, channel = new_metadata_stub()
             response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
             
             for f in response.files:
@@ -183,6 +186,7 @@ def check_file_ownership(db: Session, filename: str, user: User) -> FileDB:
                     db.commit()
                     db.refresh(file_db)
                     break
+            channel.close()
         except Exception as e:
             print(f"Error syncing file from metadata: {e}", flush=True)
     
@@ -246,15 +250,18 @@ async def upload_file(
             normalized_tags = []
         
         # 1. Request write allocation from metadata service
-        stub = get_metadata_stub()
-        write_request = pb2.WriteRequest(
-            filename=filename,
-            size=file_size,
-            tags=normalized_tags,
-            owner_id=str(current_user.id),
-            mime_type=file.content_type or "application/octet-stream"
-        )
-        allocation = stub.AssignWrite(write_request, timeout=5.0)
+        stub, channel = new_metadata_stub()
+        try:
+            write_request = pb2.WriteRequest(
+                filename=filename,
+                size=file_size,
+                tags=normalized_tags,
+                owner_id=str(current_user.id),
+                mime_type=file.content_type or "application/octet-stream"
+            )
+            allocation = stub.AssignWrite(write_request, timeout=5.0)
+        finally:
+            channel.close()
         
         file_id = allocation.file_id
         target_nodes = allocation.target_nodes
@@ -292,16 +299,20 @@ async def upload_file(
         
         # 3. Commit write to metadata service
         if successful_nodes:
-            commit_request = pb2.CommitRequest(
-                file_id=file_id,
-                size=file_size,
-                success=True,
-                successful_nodes=successful_nodes
-            )
-            commit_response = stub.CommitWrite(commit_request, timeout=5.0)
-            
-            if not commit_response.success:
-                raise HTTPException(status_code=500, detail=f"Commit failed: {commit_response.message}")
+            stub, channel = new_metadata_stub()
+            try:
+                commit_request = pb2.CommitRequest(
+                    file_id=file_id,
+                    size=file_size,
+                    success=True,
+                    successful_nodes=successful_nodes
+                )
+                commit_response = stub.CommitWrite(commit_request, timeout=5.0)
+                
+                if not commit_response.success:
+                    raise HTTPException(status_code=500, detail=f"Commit failed: {commit_response.message}")
+            finally:
+                channel.close()
         else:
             raise HTTPException(status_code=500, detail="No datanode accepted the file")
         
@@ -338,8 +349,11 @@ async def list_files(
     """
     try:
         # Consultar metadata service via gRPC
-        stub = get_metadata_stub()
-        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+        stub, channel = new_metadata_stub()
+        try:
+            response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+        finally:
+            channel.close()
         
         result = []
         for file_loc in response.files:
@@ -392,8 +406,11 @@ async def download_file(
         check_file_ownership(db, filename, current_user)
         
         # Get file metadata from metadata service
-        stub = get_metadata_stub()
-        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+        stub, channel = new_metadata_stub()
+        try:
+            response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+        finally:
+            channel.close()
         
         file_loc = None
         for f in response.files:
@@ -411,7 +428,7 @@ async def download_file(
         
         # Request chunks from datanode
         download_request = pb2.FileRequest(file_id=file_loc.file_id)
-        chunks = datanode_stub.RetrieveChunk(download_request)
+        chunks = datanode_stub.RetrieveChunk(download_request, timeout=30.0)
         
         # Collect all chunks
         file_content = b""
@@ -447,20 +464,23 @@ async def delete_file(
         file_db = check_file_ownership(db, filename, current_user)
         
         # Get file_id from metadata service
-        stub = get_metadata_stub()
-        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
-        
-        file_id = None
-        for f in response.files:
-            if f.metadata.filename == filename:
-                file_id = f.file_id
-                break
-        
-        if not file_id:
-            raise HTTPException(status_code=404, detail="Archivo no encontrado")
-        
-        # Delete via gRPC
-        delete_response = stub.DeleteFile(pb2.FileRequest(file_id=file_id), timeout=5.0)
+        stub, channel = new_metadata_stub()
+        try:
+            response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+            
+            file_id = None
+            for f in response.files:
+                if f.metadata.filename == filename:
+                    file_id = f.file_id
+                    break
+            
+            if not file_id:
+                raise HTTPException(status_code=404, detail="Archivo no encontrado")
+            
+            # Delete via gRPC
+            delete_response = stub.DeleteFile(pb2.FileRequest(file_id=file_id), timeout=5.0)
+        finally:
+            channel.close()
         
         if not delete_response.success:
             raise HTTPException(status_code=500, detail=f"Error al eliminar archivo: {delete_response.message}")
@@ -494,24 +514,27 @@ async def update_file_tags(
         file_db = check_file_ownership(db, filename, current_user)
         
         # Get file_id from metadata service
-        stub = get_metadata_stub()
-        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
-        
-        file_id = None
-        for f in response.files:
-            if f.metadata.filename == filename:
-                file_id = f.file_id
-                break
-        
-        if not file_id:
-            raise HTTPException(status_code=404, detail="Archivo no encontrado")
-        
-        # Update tags via gRPC
-        update_request = pb2.UpdateTagsRequest(
-            file_id=file_id,
-            tags=tags_update.tags
-        )
-        tag_response = stub.UpdateTags(update_request, timeout=5.0)
+        stub, channel = new_metadata_stub()
+        try:
+            response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+            
+            file_id = None
+            for f in response.files:
+                if f.metadata.filename == filename:
+                    file_id = f.file_id
+                    break
+            
+            if not file_id:
+                raise HTTPException(status_code=404, detail="Archivo no encontrado")
+            
+            # Update tags via gRPC
+            update_request = pb2.UpdateTagsRequest(
+                file_id=file_id,
+                tags=tags_update.tags
+            )
+            tag_response = stub.UpdateTags(update_request, timeout=5.0)
+        finally:
+            channel.close()
         
         if not tag_response.success:
             raise HTTPException(status_code=500, detail="Error al actualizar tags en metadata service")
@@ -550,26 +573,29 @@ async def add_tags_to_file(
         check_file_ownership(db, filename, current_user)
         
         # Get file_id from metadata service
-        stub = get_metadata_stub()
-        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
-        
-        file_id = None
-        current_tags = []
-        for f in response.files:
-            if f.metadata.filename == filename:
-                file_id = f.file_id
-                current_tags = list(f.metadata.tags)
-                break
-        
-        if not file_id:
-            raise HTTPException(status_code=404, detail="Archivo no encontrado")
-        
-        # Add tags via gRPC
-        add_request = pb2.TagRequest(
-            file_id=file_id,
-            tags=tags_update.tags
-        )
-        tag_response = stub.AddTags(add_request, timeout=5.0)
+        stub, channel = new_metadata_stub()
+        try:
+            response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+            
+            file_id = None
+            current_tags = []
+            for f in response.files:
+                if f.metadata.filename == filename:
+                    file_id = f.file_id
+                    current_tags = list(f.metadata.tags)
+                    break
+            
+            if not file_id:
+                raise HTTPException(status_code=404, detail="Archivo no encontrado")
+            
+            # Add tags via gRPC
+            add_request = pb2.TagRequest(
+                file_id=file_id,
+                tags=tags_update.tags
+            )
+            tag_response = stub.AddTags(add_request, timeout=5.0)
+        finally:
+            channel.close()
         
         if not tag_response.success:
             raise HTTPException(status_code=500, detail="Error al añadir tags en metadata service")
@@ -603,24 +629,27 @@ async def remove_tags_from_file(
         check_file_ownership(db, filename, current_user)
         
         # Get file_id from metadata service
-        stub = get_metadata_stub()
-        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
-        
-        file_id = None
-        for f in response.files:
-            if f.metadata.filename == filename:
-                file_id = f.file_id
-                break
-        
-        if not file_id:
-            raise HTTPException(status_code=404, detail="Archivo no encontrado")
-        
-        # Remove tags via gRPC
-        remove_request = pb2.TagRequest(
-            file_id=file_id,
-            tags=tags_update.tags
-        )
-        tag_response = stub.RemoveTags(remove_request, timeout=5.0)
+        stub, channel = new_metadata_stub()
+        try:
+            response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+            
+            file_id = None
+            for f in response.files:
+                if f.metadata.filename == filename:
+                    file_id = f.file_id
+                    break
+            
+            if not file_id:
+                raise HTTPException(status_code=404, detail="Archivo no encontrado")
+            
+            # Remove tags via gRPC
+            remove_request = pb2.TagRequest(
+                file_id=file_id,
+                tags=tags_update.tags
+            )
+            tag_response = stub.RemoveTags(remove_request, timeout=5.0)
+        finally:
+            channel.close()
         
         if not tag_response.success:
             raise HTTPException(status_code=500, detail="Error al eliminar tags en metadata service")
@@ -646,8 +675,11 @@ async def get_all_tags(
     """
     try:
         # Consultar metadata service via gRPC
-        stub = get_metadata_stub()
-        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+        stub, channel = new_metadata_stub()
+        try:
+            response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+        finally:
+            channel.close()
         
         tag_count = {}
         
@@ -682,8 +714,11 @@ async def get_statistics(
     """
     try:
         # Consultar metadata service via gRPC
-        stub = get_metadata_stub()
-        response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+        stub, channel = new_metadata_stub()
+        try:
+            response = stub.ListFiles(pb2.ListRequest(tags_filter=[], owner_filter=""), timeout=5.0)
+        finally:
+            channel.close()
         
         total_files = 0
         all_tags = set()
