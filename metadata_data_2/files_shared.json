@@ -1,0 +1,76 @@
+{
+  "b5ca416c-cad7-4ae3-af34-a5d1a1116359": {
+    "filename": "agenda-distribuida.pdf",
+    "size": 23774,
+    "tags": [
+      "test",
+      "asd"
+    ],
+    "owner_id": "1",
+    "replicas": [
+      "datanode-ae861ddf6014"
+    ],
+    "created_at": 1769792935,
+    "lamport_time": 2,
+    "is_deleted": false
+  },
+  "85ece08e-309e-4df8-b2c1-7097862ec8a3": {
+    "filename": "Asistencia Sistemas Distribuidos curso 2025 - Notas.pdf",
+    "size": 42497,
+    "tags": [
+      "asdasd"
+    ],
+    "owner_id": "1",
+    "replicas": [
+      "datanode-ae861ddf6014"
+    ],
+    "created_at": 1769793133,
+    "lamport_time": 1,
+    "is_deleted": false
+  },
+  "3c48b190-bf0f-4c12-87ce-7d93055499d5": {
+    "filename": "test_tagfs.txt",
+    "size": 54,
+    "tags": [
+      "test",
+      "auto"
+    ],
+    "owner_id": "6",
+    "replicas": [
+      "datanode-ae861ddf6014"
+    ],
+    "created_at": 1769793284,
+    "lamport_time": 2,
+    "is_deleted": false
+  },
+  "4839aacc-a619-49c7-8655-6144fb7021dc": {
+    "filename": "test_tagfs.txt",
+    "size": 54,
+    "tags": [
+      "test",
+      "auto"
+    ],
+    "owner_id": "7",
+    "replicas": [
+      "datanode-ae861ddf6014"
+    ],
+    "created_at": 1769793414,
+    "lamport_time": 3,
+    "is_deleted": false
+  },
+  "40f14e89-fd6e-4d08-88ba-9034b69321f8": {
+    "filename": "test_tagfs.txt",
+    "size": 54,
+    "tags": [
+      "test",
+      "auto"
+    ],
+    "owner_id": "8",
+    "replicas": [
+      "datanode-ae861ddf6014"
+    ],
+    "created_at": 1769793500,
+    "lamport_time": 1,
+    "is_deleted": false
+  }
+}

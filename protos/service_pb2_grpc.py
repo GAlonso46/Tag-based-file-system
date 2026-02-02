@@ -360,6 +360,11 @@ class MetadataServiceStub(object):
                 request_serializer=protos_dot_service__pb2.GossipRequest.SerializeToString,
                 response_deserializer=protos_dot_service__pb2.GossipUpdate.FromString,
                 _registered_method=True)
+        self.PropagatePending = channel.unary_unary(
+                '/tagfs.MetadataService/PropagatePending',
+                request_serializer=protos_dot_service__pb2.PendingUploadEntry.SerializeToString,
+                response_deserializer=protos_dot_service__pb2.GossipAck.FromString,
+                _registered_method=True)
         self.CompareMerkleRoot = channel.unary_unary(
                 '/tagfs.MetadataService/CompareMerkleRoot',
                 request_serializer=protos_dot_service__pb2.MerkleRootRequest.SerializeToString,
@@ -463,6 +468,13 @@ class MetadataServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def PropagatePending(self, request, context):
+        """Replication of Pending Uploads (Pre-Commit)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def CompareMerkleRoot(self, request, context):
         """Merkle Tree Anti-Entropy
         """
@@ -544,6 +556,11 @@ def add_MetadataServiceServicer_to_server(servicer, server):
                     servicer.GossipPull,
                     request_deserializer=protos_dot_service__pb2.GossipRequest.FromString,
                     response_serializer=protos_dot_service__pb2.GossipUpdate.SerializeToString,
+            ),
+            'PropagatePending': grpc.unary_unary_rpc_method_handler(
+                    servicer.PropagatePending,
+                    request_deserializer=protos_dot_service__pb2.PendingUploadEntry.FromString,
+                    response_serializer=protos_dot_service__pb2.GossipAck.SerializeToString,
             ),
             'CompareMerkleRoot': grpc.unary_unary_rpc_method_handler(
                     servicer.CompareMerkleRoot,
@@ -910,6 +927,33 @@ class MetadataService(object):
             '/tagfs.MetadataService/GossipPull',
             protos_dot_service__pb2.GossipRequest.SerializeToString,
             protos_dot_service__pb2.GossipUpdate.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PropagatePending(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/tagfs.MetadataService/PropagatePending',
+            protos_dot_service__pb2.PendingUploadEntry.SerializeToString,
+            protos_dot_service__pb2.GossipAck.FromString,
             options,
             channel_credentials,
             insecure,

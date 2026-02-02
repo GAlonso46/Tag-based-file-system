@@ -1,4 +1,5 @@
 import os
+import time
 import io
 import grpc
 import json
@@ -49,6 +50,9 @@ def startup():
 
 # gRPC Clients - no longer maintaining persistent connections
 
+# Global ThreadPoolExecutor for parallel uploads (prevents thread exhaustion)
+UPLOAD_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=32)
+
 def get_grpc_credentials():
     """Get gRPC credentials (TLS or insecure)"""
     if not ENABLE_TLS:
@@ -74,8 +78,13 @@ def get_grpc_credentials():
         print("[Gateway] Falling back to insecure connections", flush=True)
         return None
 
-def new_metadata_stub():
+def new_metadata_stub(host=None, port=None):
     """Create a new ephemeral metadata stub (DNS round-robin each time)"""
+    if not host:
+        host = os.getenv("METADATA_HOST", "metadata")
+    if not port:
+        port = os.getenv("METADATA_PORT", "50051")
+        
     options = [
         ('grpc.max_send_message_length', 100 * 1024 * 1024),
         ('grpc.max_receive_message_length', 100 * 1024 * 1024),
@@ -96,40 +105,12 @@ def new_metadata_stub():
     
     return pb2_grpc.MetadataServiceStub(channel), channel
 
-def get_all_metadata_stubs():
-    """Get stubs for ALL metadata replicas using round-robin DNS queries"""
-    options = [
-        ('grpc.max_send_message_length', 100 * 1024 * 1024),
-        ('grpc.max_receive_message_length', 100 * 1024 * 1024),
-    ]
-    
-    # Expected number of metadata replicas
-    EXPECTED_REPLICAS = int(os.getenv("EXPECTED_METADATA_REPLICAS", "3"))
-    
-    stubs = []
-    credentials = get_grpc_credentials()
-    
-    # Create multiple connections - Docker DNS will round-robin to different IPs
-    for i in range(EXPECTED_REPLICAS):
-        try:
-            if credentials:
-                channel = grpc.secure_channel(f'{METADATA_HOST}:{METADATA_PORT}', credentials, options=options)
-            else:
-                channel = grpc.insecure_channel(f'{METADATA_HOST}:{METADATA_PORT}', options=options)
-            stub = pb2_grpc.MetadataServiceStub(channel)
-            stubs.append(stub)
-        except Exception as e:
-            print(f"[Gateway] Failed to connect to metadata replica {i+1}: {e}", flush=True)
-    
-    print(f"[Gateway] Created {len(stubs)} metadata connections (expecting {EXPECTED_REPLICAS})", flush=True)
-    if not stubs:
-        stub, channel = new_metadata_stub()
-        return [(stub, channel)]
-    return stubs
 
 
 
-def get_datanode_stub(host, port):
+
+def new_datanode_stub(host, port):
+    """Create ephemeral datanode stub with channel for cleanup"""
     options = [
         ('grpc.max_send_message_length', 100 * 1024 * 1024),
         ('grpc.max_receive_message_length', 100 * 1024 * 1024),
@@ -141,7 +122,7 @@ def get_datanode_stub(host, port):
     else:
         channel = grpc.insecure_channel(f'{host}:{port}', options=options)
     
-    return pb2_grpc.DataNodeServiceStub(channel)
+    return pb2_grpc.DataNodeServiceStub(channel), channel
 
 # Generators
 def chunk_generator(file_id, content):
@@ -178,9 +159,14 @@ async def upload_file(
         size = len(content)
         normalized_tags = normalize_tags(tags) if tags else []
 
+        # LOGGING START
+        start_time = time.time()
+        print(f"[Gateway] Starting upload for {filename} ({size} bytes)", flush=True)
+
         meta, channel = new_metadata_stub()
 
-        # Ask Metadata where to put it
+        # Ask Metadata where to put it (longer timeout during auto-healing)
+        t0 = time.time()
         try:
             alloc = meta.AssignWrite(
                 pb2.WriteRequest(
@@ -190,35 +176,50 @@ async def upload_file(
                     owner_id=str(current_user.id),
                     mime_type=file.content_type
                 ),
-                timeout=5
+                timeout=10
             )
+            print(f"[Gateway] AssignWrite took {time.time() - t0:.4f}s - Nodes: {[n.node_id for n in alloc.target_nodes]}", flush=True)
+        except Exception as e:
+            print(f"[Gateway] AssignWrite FAILED after {time.time() - t0:.4f}s: {e}", flush=True)
+            raise
         finally:
             channel.close()
 
         file_id = alloc.file_id
         target_nodes = alloc.target_nodes
+        file_id = alloc.file_id
+        target_nodes = alloc.target_nodes
+
 
         if not target_nodes:
             raise HTTPException(503, "No storage nodes available")
 
         success_nodes = []
 
-        loop = asyncio.get_event_loop()
-        executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(target_nodes)
-        )
+        loop = asyncio.get_running_loop()
+        executor = UPLOAD_EXECUTOR
 
         def upload_to_node(node):
+            channel = None
+            t_node = time.time()
             try:
-                ds = get_datanode_stub(node.address, node.port)
+                print(f"[Gateway] Uploading chunk to {node.node_id}...", flush=True)
+                ds, channel = new_datanode_stub(node.address, node.port)
                 resp = ds.StoreChunk(
                     chunk_generator(file_id, content),
                     timeout=60
                 )
+                duration = time.time() - t_node
                 if resp.success:
+                    print(f"[Gateway] StoreChunk to {node.node_id} SUCCESS in {duration:.4f}s", flush=True)
                     return node.node_id
-            except:
-                pass
+                else:
+                    print(f"[Gateway] StoreChunk to {node.node_id} FAILED in {duration:.4f}s: {resp.message}", flush=True)
+            except Exception as e:
+                print(f"[Gateway] StoreChunk to {node.node_id} EXCEPTION after {time.time() - t_node:.4f}s: {e}", flush=True)
+            finally:
+                if channel:
+                    channel.close()
             return None
 
         tasks = [
@@ -229,6 +230,7 @@ async def upload_file(
         results = await asyncio.gather(*tasks)
 
         success_nodes = [r for r in results if r]
+        print(f"[Gateway] Successful nodes: {success_nodes}", flush=True)
 
         # AP rule
         if not success_nodes:
@@ -236,8 +238,13 @@ async def upload_file(
                 503, "Could not store file on any DataNode"
             )
 
-        # Commit metadata
+        # Commit metadata (Standard Round-Robin via Network Alias)
+        t_commit = time.time()
+        print(f"[Gateway] Committing write for {file_id}...", flush=True)
+        
+        # Como ahora replicamos el pending_state, podemos ir a CUALQUIER nodo
         meta, channel = new_metadata_stub()
+
         try:
             meta.CommitWrite(
                 pb2.CommitRequest(
@@ -246,10 +253,17 @@ async def upload_file(
                     success=True,
                     successful_nodes=success_nodes
                 ),
-                timeout=5
+                timeout=40
             )
+            print(f"[Gateway] CommitWrite SUCCESS in {time.time() - t_commit:.4f}s", flush=True)
+        except Exception as e:
+            print(f"[Gateway] CommitWrite FAILED after {time.time() - t_commit:.4f}s: {e}", flush=True)
+            raise
         finally:
             channel.close()
+        
+        total_time = time.time() - start_time
+        print(f"[Gateway] Total upload time: {total_time:.4f}s", flush=True)
 
         return {
             "name": filename,
@@ -283,8 +297,9 @@ async def download_file(
 
     # Try replicas one by one
     for node in loc.replica_nodes:
+        channel = None
         try:
-            ds = get_datanode_stub(node.address, node.port)
+            ds, channel = new_datanode_stub(node.address, node.port)
             ds.Ping(pb2.PingRequest(), timeout=2)
 
             chunks_iter = ds.RetrieveChunk(
@@ -306,6 +321,8 @@ async def download_file(
             )
 
         except Exception as e:
+            if channel:
+                channel.close()
             print(
                 f"[Gateway] Replica {node.node_id} failed: {e}",
                 flush=True

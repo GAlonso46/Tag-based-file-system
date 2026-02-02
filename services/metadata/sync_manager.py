@@ -1,8 +1,8 @@
 import socket
 import grpc
 import logging
-import threading
 import random
+from concurrent.futures import ThreadPoolExecutor
 import protos.service_pb2 as pb2
 import protos.service_pb2_grpc as pb2_grpc
 
@@ -12,6 +12,8 @@ class SyncManager:
     def __init__(self, node_id, port=50051):
         self.node_id = node_id
         self.port = port
+        # Thread pool para gossip asíncrono (no bloquea CommitWrite)
+        self.gossip_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="gossip")
 
     # ==========================================================
     # DNS DISCOVERY VIA ALIAS
@@ -45,6 +47,48 @@ class SyncManager:
     # GOSSIP PUSH
     # ==========================================================
     def broadcast_update(self, file_id, meta_entry):
+        """
+        Broadcast asíncrono: encola y retorna inmediatamente.
+        NO bloquea al caller (CommitWrite).
+        """
+        # Encolar en thread pool (retorna inmediatamente)
+        self.gossip_executor.submit(self._do_broadcast, file_id, meta_entry)
+        
+    def broadcast_pending(self, pending_data):
+        """
+        Replica la intención de escritura (pending upload) a otros nodos.
+        Esto permite que CommitWrite pueda llegar a CUALQUIER nodo.
+        """
+        self.gossip_executor.submit(self._do_broadcast_pending, pending_data)
+    
+    def _do_broadcast_pending(self, data):
+        peers = self.get_peer_ips()
+        if not peers:
+            return
+            
+        entry = pb2.PendingUploadEntry(
+            file_id=data["file_id"],
+            filename=data["filename"],
+            tags=data.get("tags", []),
+            owner_id=data.get("owner_id", ""),
+            mime_type=data.get("mime_type", ""),
+            replicas_expected=data.get("replicas_expected", [])
+        )
+        
+        for ip in peers:
+            self.gossip_executor.submit(self._send_pending, ip, entry)
+
+    def _send_pending(self, ip, message):
+        try:
+            channel = grpc.insecure_channel(f"{ip}:{self.port}")
+            stub = pb2_grpc.MetadataServiceStub(channel)
+            stub.PropagatePending(message, timeout=2)
+            channel.close()
+        except Exception:
+            pass
+
+    def _do_broadcast(self, file_id, meta_entry):
+        """Worker que ejecuta el broadcast real en background."""
         peers = self.get_peer_ips()
         if not peers:
             return
@@ -57,7 +101,8 @@ class SyncManager:
             size=meta_entry.get("size", 0),
             replicas=meta_entry.get("replicas", []),
             created_at=meta_entry.get("created_at", 0),
-            lamport_time=meta_entry.get("lamport_time", 0)
+            lamport_time=meta_entry.get("lamport_time", 0),
+            is_deleted=meta_entry.get("is_deleted", False)
         )
 
         update_msg = pb2.GossipUpdate(
@@ -66,11 +111,8 @@ class SyncManager:
         )
 
         for ip in peers:
-            threading.Thread(
-                target=self._send_push,
-                args=(ip, update_msg),
-                daemon=True
-            ).start()
+            # Usar thread pool para paralelizar envíos
+            self.gossip_executor.submit(self._send_push, ip, update_msg)
 
     def _send_push(self, ip, message):
         try:

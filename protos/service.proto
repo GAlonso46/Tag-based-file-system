@@ -113,11 +113,23 @@ service MetadataService {
   rpc GossipPush (GossipUpdate) returns (GossipAck);
   rpc GossipPull (GossipRequest) returns (GossipUpdate);
   
+  // Replication of Pending Uploads (Pre-Commit)
+  rpc PropagatePending (PendingUploadEntry) returns (GossipAck);
+  
   // Merkle Tree Anti-Entropy
   rpc CompareMerkleRoot (MerkleRootRequest) returns (MerkleRootResponse);
   
   // Health Check for Peer Discovery
   rpc Ping (PingRequest) returns (PingResponse);
+}
+
+message PendingUploadEntry {
+  string file_id = 1;
+  string filename = 2;
+  repeated string tags = 3;
+  string owner_id = 4;
+  string mime_type = 5;
+  repeated string replicas_expected = 6;
 }
 
 message WriteRequest {
@@ -220,6 +232,7 @@ message FileMetadataEntry {
   int64 created_at = 7;
   int64 lamport_time = 8;
   map<int32, int32> version_vector = 9; // node_id -> version
+  bool is_deleted = 10;
 }
 
 message GossipUpdate {

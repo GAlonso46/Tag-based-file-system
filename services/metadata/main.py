@@ -45,6 +45,10 @@ active_nodes = {}       # { node_id: { address, port, last_seen } }
 active_nodes_lock = threading.Lock()
 metadata_lock = threading.Lock()
 
+# Queue para persistencia asíncrona (evita bloqueos en CommitWrite)
+import queue
+persistence_queue = queue.Queue(maxsize=100)
+
 current_lamport_time = 0
 node_id = socket.gethostname() # Usado como ID único
 sync_manager = SyncManager(node_id=node_id)
@@ -77,45 +81,71 @@ def save_state():
         except Exception as e:
             logger.error(f"Error guardando estado: {e}")
 
+def save_state_async():
+    """
+    Persistencia asíncrona: Adquiere lock, copia estado y encola.
+    Usar ESTA función si NO tienes el lock.
+    """
+    global files_metadata
+    with metadata_lock:
+        snapshot = files_metadata.copy()
+    persistence_queue.put(snapshot)
+
+def queue_snapshot_no_lock():
+    """
+    Persistencia asíncrona: Asume que YA tienes el lock.
+    Solo hace copy y put.
+    """
+    global files_metadata
+    # ASUMIMOS QUE EL CALLER TIENE EL LOCK
+    snapshot = files_metadata.copy()
+    persistence_queue.put(snapshot)
+
+def persistence_worker():
+    """
+    Thread dedicado que escribe a disco sin bloquear requests.
+    """
+    logger.info("[Persistence] Worker thread iniciado")
+    
+    while True:
+        try:
+            snapshot = persistence_queue.get(timeout=5)
+            try:
+                tmp_file = FILES_DB.with_suffix(".tmp")
+                with open(tmp_file, "w") as f:
+                    json.dump(snapshot, f, indent=2)
+                tmp_file.replace(FILES_DB)
+                logger.debug(f"[Persistence] Guardado {len(snapshot)} archivos")
+            except Exception as e:
+                logger.error(f"[Persistence] Error escribiendo: {e}")
+            persistence_queue.task_done()
+        except Exception:
+            pass
+
 def save_state_locked(incoming_files=None):
     """
-    Versión mejorada de save_state que usa locks de archivo 
-    y comparación de versiones para evitar redundancia.
+    LEGACY: Ahora solo mezcla incoming y llama a persistencia.
+    NO adquiere lock para persistencia si ya lo tenemos (evita deadlock).
     """
-    global files_metadata, current_lamport_time
+    global files_metadata
     
-    with metadata_lock:
-        try:
-            with open(FILES_DB, "r+") as f:
-                # Bloqueo exclusivo del archivo
-                fcntl.flock(f, fcntl.LOCK_EX)
-                
-                # Leer estado actual del disco
-                disk_data = json.load(f) if os.path.getsize(FILES_DB) > 0 else {}
-                
-                changed = False
-                # Si recibimos datos vía Gossip, comparamos versiones
-                if incoming_files:
-                    for fid, incoming_meta in incoming_files.items():
-                        local_meta = disk_data.get(fid)
-                        # Solo actualizar si la versión (lamport) es mayor
-                        if not local_meta or incoming_meta['lamport_time'] > local_meta.get('lamport_time', -1):
-                            disk_data[fid] = incoming_meta
-                            changed = True
-                else:
-                    # Si es una escritura local (Commit/UpdateTags), usamos el estado en memoria
-                    disk_data = files_metadata
-                    changed = True
-
-                if changed:
-                    f.seek(0)
-                    json.dump(disk_data, f, indent=2)
-                    f.truncate()
-                    files_metadata = disk_data # Sincronizar memoria con disco
-                
-                fcntl.flock(f, fcntl.LOCK_UN) # Liberar lock
-        except Exception as e:
-            logger.error(f"Error en persistencia segura: {e}")
+    # Esta función se llama históricamente "locked" porque antes bloqueaba disco.
+    # Ahora solo gestiona merge de estado.
+    
+    # El caller responsable de llamar aqui debe saber si tiene el lock o no.
+    # Pero para no romper compatibilidad, asumimos que save_state_locked se llama
+    # DESDE LUGARES QUE YA TIENEN EL LOCK (como process_gossip_update).
+    
+    if incoming_files:
+        # ASUMIMOS QUE TENEMOS EL LOCK para modificar files_metadata
+        for fid, incoming_meta in incoming_files.items():
+            local_meta = files_metadata.get(fid)
+            if not local_meta or incoming_meta.get('lamport_time', 0) > local_meta.get('lamport_time', -1):
+                files_metadata[fid] = incoming_meta
+    
+    # IMPORTANTE: save_state_locked suele llamarse dentro de un bloque 'with metadata_lock'
+    # Por tanto, debemos usar la versión SIN LOCK.
+    queue_snapshot_no_lock()
 # ================= HEARTBEATS (UDP) =================
 
 MULTICAST_PORT = 5000
@@ -181,9 +211,12 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
 
     def AssignWrite(self, request, context):
         """Gateway solicita dónde escribir"""
+        t0 = time.time()
+        logger.info(f"AssignWrite request for {request.filename}")
+        
         with active_nodes_lock:
             available = list(active_nodes.items())
-
+        
         if not available:
             context.abort(grpc.StatusCode.UNAVAILABLE, "No hay DataNodes activos")
 
@@ -193,25 +226,51 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
         
         file_id = str(uuid.uuid4())
         
-        # Guardar intención temporalmente
-        self.pending_uploads[file_id] = {
+        # Datos de la intención
+        pending_data = {
+            "file_id": file_id,
             "filename": request.filename,
             "tags": list(request.tags),
-            "owner_id": request.owner_id,      # Importante: Gateway lo envía
-            "mime_type": request.mime_type,    # Importante: Gateway lo envía
+            "owner_id": request.owner_id,
+            "mime_type": request.mime_type,
             "replicas_expected": [nid for nid, _ in selected]
         }
+        
+        # Guardar intención LOCALMENTE
+        self.pending_uploads[file_id] = pending_data
+
+        # REPLICAR intención a otros nodos (Best effort async)
+        # Esto permite que CommitWrite vaya a otro nodo si el load balancer lo decide
+        sync_manager.broadcast_pending(pending_data)
 
         resp = pb2.WriteAllocation(file_id=file_id)
         for nid, info in selected:
             resp.target_nodes.append(pb2.NodeInfo(
                 node_id=nid, address=info["address"], port=info["port"]
             ))
+        
+        logger.info(f"AssignWrite allocated {file_id} to {[nid for nid, _ in selected]} in {time.time() - t0:.4f}s")
         return resp
+
+    def PropagatePending(self, request, context):
+        """RPC para recibir una intención de escritura de otro nodo"""
+        logger.info(f"Recibida intención PendingUpload: {request.file_id}")
+        self.pending_uploads[request.file_id] = {
+            "filename": request.filename,
+            "tags": list(request.tags),
+            "owner_id": request.owner_id,
+            "mime_type": request.mime_type,
+            "replicas_expected": list(request.replicas_expected)
+        }
+        return pb2.GossipAck(ok=True)
 
     def CommitWrite(self, request, context):
         global current_lamport_time
+        t0 = time.time()
+        logger.info(f"CommitWrite request for {request.file_id}")
+        
         if request.file_id not in self.pending_uploads:
+            logger.warning(f"CommitWrite failed: {request.file_id} not in pending_uploads")
             return pb2.CommitResponse(success=False)
 
         data = self.pending_uploads.pop(request.file_id)
@@ -231,12 +290,23 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
             "lamport_time": current_lamport_time # Asignar versión
         }
 
+        t_lock = time.time()
         with metadata_lock:
+            lock_duration = time.time() - t_lock
             files_metadata[request.file_id] = meta_entry
         
-        save_state_locked()
-        # DISPARAR GOSSIP
+        # Sincronización
+        t_persist = time.time()
+        # Usamos save_state_async (con lock) porque YA NO tenemos el lock aquí
+        save_state_async()
+        persist_time = time.time() - t_persist
+        
+        t_gossip = time.time()
         sync_manager.broadcast_update(request.file_id, meta_entry)
+        gossip_time = time.time() - t_gossip
+        
+        total_time = time.time() - t0
+        logger.info(f"CommitWrite {request.file_id} finished in {total_time:.4f}s (Lock: {lock_duration:.4f}s, Persist: {persist_time:.4f}s, Gossip: {gossip_time:.4f}s)")
         
         return pb2.CommitResponse(success=True)
 
@@ -278,7 +348,7 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
                 "replicas": list(f.replicas),
                 "created_at": f.created_at,
                 "lamport_time": f.lamport_time,
-                "is_deleted": False 
+                "is_deleted": f.is_deleted
             }
             current_lamport_time = max(current_lamport_time, f.lamport_time)
         
@@ -626,21 +696,25 @@ def serve():
     load_state()
     service_instance = MetadataService() 
     
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    # Aumentamos workers a 100 para evitar saturación
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=100))
     pb2_grpc.add_MetadataServiceServicer_to_server(service_instance, server)
     server.add_insecure_port(f"[::]:{PORT}")
 
     # 1. Hilos iniciales
     threading.Thread(target=heartbeat_listener, daemon=True).start()
     threading.Thread(target=node_monitor, daemon=True).start()
+    
+    # 2. Persistence worker (NUEVO - evita bloqueos)
+    threading.Thread(target=persistence_worker, daemon=True).start()
 
-    # 2. Hilo de Sincronización Periódica
+    # 3. Hilo de Sincronización Periódica
     threading.Thread(target=sync_manager.periodic_sync_loop, args=(service_instance,), daemon=True).start()
     
-    # 3. Hilo de Auto-Healing
+    # 4. Hilo de Auto-Healing
     threading.Thread(target=replication_loop, args=(service_instance,), daemon=True).start()
 
-    # 4.Intentar un Pull inicial inmediatamente al arrancar
+    # 5. Intentar un Pull inicial inmediatamente al arrancar
     def initial_sync():
         time.sleep(5) # Esperar a que otros nodos estén listos
         logger.info("Ejecutando sincronización inicial (Cold Start)...")
