@@ -360,7 +360,8 @@ class MetadataService(pb2_grpc.MetadataServiceServicer):
                     size=meta.get('size', 0),
                     replicas=meta.get('replicas', []),
                     created_at=meta.get('created_at', 0),
-                    lamport_time=meta.get('lamport_time', 0)
+                    lamport_time=meta.get('lamport_time', 0),
+                    is_deleted=meta.get('is_deleted', False)
                 ))
         
         return pb2.GossipUpdate(
