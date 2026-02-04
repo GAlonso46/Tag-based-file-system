@@ -190,7 +190,7 @@ class DataNode(pb2_grpc.DataNodeServiceServicer):
 
             # 2. Solicitar el archivo (Stream)
             print(f"[{NODE_ID}] 📥 Solicitando chunks de {file_id}...", flush=True)
-            chunk_iterator = stub.RetrieveChunk(pb2.FileRequest(file_id=file_id))
+            chunk_iterator = stub.RetrieveChunk(pb2.FileRequest(file_id=file_id), timeout=300)
 
             # 3. Guardar en disco (Stream to File)
             bytes_written = 0

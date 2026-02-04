@@ -137,11 +137,45 @@ def save_state_locked(incoming_files=None):
     # DESDE LUGARES QUE YA TIENEN EL LOCK (como process_gossip_update).
     
     if incoming_files:
+        # LOGGING DETALLADO SOLICITADO
+        logger.info(f"[Merge] Procesando lote de {len(incoming_files)} archivos externos")
+
         # ASUMIMOS QUE TENEMOS EL LOCK para modificar files_metadata
         for fid, incoming_meta in incoming_files.items():
             local_meta = files_metadata.get(fid)
-            if not local_meta or incoming_meta.get('lamport_time', 0) > local_meta.get('lamport_time', -1):
+            
+            incoming_ver = incoming_meta.get('lamport_time', 0)
+            
+            # 1. Archivo Nuevo
+            if not local_meta:
+                logger.info(f"[Merge] > NUEVO: {fid} (v.{incoming_ver})")
                 files_metadata[fid] = incoming_meta
+                continue
+
+            local_ver = local_meta.get('lamport_time', 0)
+
+            # 2. Versión Mayor (Update Standard)
+            if incoming_ver > local_ver:
+                logger.info(f"[Merge] > UPDATE: {fid} v.{local_ver} -> v.{incoming_ver}")
+                files_metadata[fid] = incoming_meta
+            
+            # 3. Empate (CONFLICTO) - AQUI ESTABA EL BUG
+            elif incoming_ver == local_ver:
+                # Politica: Delete Wins (Si uno dice borrado y el otro no, gana borrado)
+                incoming_deleted = incoming_meta.get("is_deleted", False)
+                local_deleted = local_meta.get("is_deleted", False)
+                
+                if incoming_deleted and not local_deleted:
+                    logger.warning(f"[Merge] > CONFLICTO ({fid}): Empate v.{local_ver}. GANA DELETE EXTERNO.")
+                    files_metadata[fid] = incoming_meta
+                elif not incoming_deleted and local_deleted:
+                     logger.info(f"[Merge] . Ignorando Alive vs Delete local (Gana Delete local)")
+                else:
+                     logger.debug(f"[Merge] . Idénticos v.{local_ver}")
+
+            # 4. Versión Menor (Stale)
+            else:
+                logger.debug(f"[Merge] x OLD: {fid} v.{incoming_ver} < v.{local_ver}")
     
     # IMPORTANTE: save_state_locked suele llamarse dentro de un bloque 'with metadata_lock'
     # Por tanto, debemos usar la versión SIN LOCK.
@@ -602,7 +636,7 @@ def replication_loop(service_instance):
                     source_node_port=src_info["port"]
                 )
 
-                resp = stub.ReplicateFrom(req, timeout=10)
+                resp = stub.ReplicateFrom(req, timeout=300)
                 channel.close()
 
                 if resp.success:

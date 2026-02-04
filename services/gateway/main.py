@@ -207,7 +207,7 @@ async def upload_file(
                 ds, channel = new_datanode_stub(node.address, node.port)
                 resp = ds.StoreChunk(
                     chunk_generator(file_id, content),
-                    timeout=60
+                    timeout=300
                 )
                 duration = time.time() - t_node
                 if resp.success:
@@ -304,7 +304,7 @@ async def download_file(
 
             chunks_iter = ds.RetrieveChunk(
                 pb2.FileRequest(file_id=file_id),
-                timeout=30
+                timeout=300
             )
 
             def stream():
